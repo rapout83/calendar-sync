@@ -22,15 +22,17 @@ class CalendarSyncJobService : JobService() {
         schedule(applicationContext)
         showProgressNotification()
 
-        // Queue behind a running sync instead of replacing it: every
+        // Keep a queued or running sync instead of replacing it: every
         // calendar write (including the sync's own) lands here, and
         // replacing would kill the sync midway and can leave duplicates.
+        // Changes made during a run are picked up by the next trigger or
+        // the periodic sync.
         val request = OneOffTaskRequest(
             uniqueName = "calendar_sync_reactive",
             taskName = "syncTask",
             tag = "calendar_sync_reactive",
             initialDelaySeconds = 5,
-            existingWorkPolicy = ExistingWorkPolicy.APPEND_OR_REPLACE,
+            existingWorkPolicy = ExistingWorkPolicy.KEEP,
         )
         WorkManagerWrapper(applicationContext).enqueueOneOffTask(request)
 
