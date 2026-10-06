@@ -65,10 +65,14 @@ class ToUpdateEntry {
   final Map<String, Object?> mapping;
   final String projectedTitle;
 
+  /// What differed between source and target, for the sync log.
+  final String reason;
+
   const ToUpdateEntry({
     required this.sourceEvent,
     required this.mapping,
     required this.projectedTitle,
+    this.reason = '',
   });
 }
 
@@ -172,6 +176,17 @@ class SyncEngine {
     } catch (_) {
       // Logging must never break a sync.
     }
+  }
+
+  static String _stamp(DateTime time) {
+    final local = time.toLocal().toIso8601String();
+    return local.length >= 16 ? local.substring(0, 16) : local;
+  }
+
+  static String _snippet(String? text) {
+    if (text == null) return '<none>';
+    final flat = text.replaceAll('\n', '\\n');
+    return flat.length > 120 ? '${flat.substring(0, 120)}...' : flat;
   }
 
   static String _describe(Event event) {
@@ -550,10 +565,23 @@ class SyncEngine {
           return;
         }
 
+        final reasons = <String>[
+          if (timeChanged)
+            'time: source ${_stamp(event.startDate)}..${_stamp(event.endDate)}'
+                '${event.isAllDay ? ' all-day' : ''}'
+                ', target ${_stamp(targetEvent.startDate)}..'
+                '${_stamp(targetEvent.endDate)}'
+                '${targetEvent.isAllDay ? ' all-day' : ''}'
+                '${canonicalTime != null ? ', canonical $canonicalTime' : ''}',
+          if (titleChanged)
+            'title not in target description: '
+                '"${_snippet(targetEvent.description)}"',
+        ];
         toUpdate.add(ToUpdateEntry(
           sourceEvent: event,
           mapping: Map<String, Object?>.from(mapping),
           projectedTitle: syncEventName.isEmpty ? event.title : syncEventName,
+          reason: reasons.join('; '),
         ));
         return;
       }
@@ -657,15 +685,21 @@ class SyncEngine {
         final canonicalTime = hasRecurrence
             ? '${event.startDate.hour.toString().padLeft(2, '0')}:${event.startDate.minute.toString().padLeft(2, '0')}'
             : null;
-        await _mappingDb.insertMapping(
-          profileId: profileId,
-          sourceCalendarId: sourceCalendarId,
-          sourceEventId: eventId,
-          targetCalendarId: targetCalendarId,
-          targetEventId: targetEventId,
-          syncedAt: DateTime.now().toIso8601String(),
-          canonicalTime: canonicalTime,
-        );
+        try {
+          await _mappingDb.insertMapping(
+            profileId: profileId,
+            sourceCalendarId: sourceCalendarId,
+            sourceEventId: eventId,
+            targetCalendarId: targetCalendarId,
+            targetEventId: targetEventId,
+            syncedAt: DateTime.now().toIso8601String(),
+            canonicalTime: canonicalTime,
+          );
+        } catch (e) {
+          // Without a mapping the new event would be an untracked duplicate.
+          await _calendarService.deleteEvent(targetEventId);
+          rethrow;
+        }
 
         await _mappingDb.insertCreatedEvent(
           targetCalendarId,
@@ -711,36 +745,41 @@ class SyncEngine {
           continue;
         }
 
-        await _calendarService.deleteEvent(targetEventId).then((result) {
-          if (!result.success) {
-            errors.add('$eventId: failed to delete old target event');
-          }
-        });
-        await _mappingDb.deleteCreatedEvent(targetCalId, targetEventId);
-
+        // Point the mapping at the replacement before touching the old
+        // event. If this fails, the replacement would be an untracked
+        // duplicate, so remove it and keep the old one.
         final canonicalTime = hasRecurrence
             ? '${event.startDate.hour.toString().padLeft(2, '0')}:${event.startDate.minute.toString().padLeft(2, '0')}'
             : null;
-        await _mappingDb.insertMapping(
-          profileId: profileId,
-          sourceCalendarId: sourceCalendarId,
-          sourceEventId: eventId,
-          targetCalendarId: targetCalId,
-          targetEventId: newTargetEventId,
-          syncedAt: DateTime.now().toIso8601String(),
-          canonicalTime: canonicalTime,
-        );
-
-        await _mappingDb.insertCreatedEvent(
-          targetCalId,
-          newTargetEventId,
-        );
+        try {
+          await _mappingDb.insertMapping(
+            profileId: profileId,
+            sourceCalendarId: sourceCalendarId,
+            sourceEventId: eventId,
+            targetCalendarId: targetCalId,
+            targetEventId: newTargetEventId,
+            syncedAt: DateTime.now().toIso8601String(),
+            canonicalTime: canonicalTime,
+          );
+        } catch (e) {
+          await _calendarService.deleteEvent(newTargetEventId);
+          rethrow;
+        }
 
         await _log(
           profileId,
-          'UPDATE ${_describe(event)} tgt=$targetEventId -> $newTargetEventId',
+          'UPDATE ${_describe(event)} tgt=$targetEventId -> $newTargetEventId '
+          '(${entry.reason})',
         );
         updated.add(eventId);
+
+        await _mappingDb.insertCreatedEvent(targetCalId, newTargetEventId);
+
+        final deleteResult = await _calendarService.deleteEvent(targetEventId);
+        if (!deleteResult.success) {
+          errors.add('$eventId: failed to delete old target event');
+        }
+        await _mappingDb.deleteCreatedEvent(targetCalId, targetEventId);
       } catch (e) {
         errors.add('$eventId: $e');
       }

@@ -1002,6 +1002,90 @@ void main() {
       expect(result.updated, ['src-1']);
     });
 
+    test('update path: mapping save fails -> replacement removed, old kept',
+        () async {
+      final srcEvent = _makeEvent('src-1', start: start, end: end);
+      when(() => calendarService.listEvents(sourceCalId))
+          .thenAnswer((_) async => [srcEvent]);
+      when(() => mappingDb.listMappingsForCalendar(profileId, sourceCalId)).thenAnswer(
+        (_) async => [{
+          'id': 1, 'source_event_id': 'src-1',
+          'target_event_id': 'tgt-1', 'target_calendar_id': targetCalId,
+        }],
+      );
+      when(() => mappingDb.isEventCreatedBySync(sourceCalId, 'src-1'))
+          .thenAnswer((_) async => false);
+      when(() => mappingDb.isEventSynced(profileId, sourceCalId, 'src-1'))
+          .thenAnswer((_) async => true);
+      when(() => calendarService.getEvent('tgt-1')).thenAnswer(
+        (_) async => _makeEvent('tgt-1',
+            start: start, end: end.subtract(const Duration(hours: 1))),
+      );
+      when(() => calendarService.createEvent(
+        targetCalId, syncName, start, end,
+        description: 'Test Event\n---\n🔃 Automatically created by CalSync',
+        isAllDay: false,
+      )).thenAnswer((_) async => 'new-id-2');
+      when(() => calendarService.deleteEvent('new-id-2'))
+          .thenAnswer((_) async => const CalendarDeleteResult(success: true));
+      when(() => mappingDb.insertMapping(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId, sourceEventId: 'src-1',
+        targetCalendarId: targetCalId, targetEventId: 'new-id-2',
+        syncedAt: any(named: 'syncedAt'),
+        canonicalTime: any(named: 'canonicalTime'),
+      )).thenThrow(Exception('database is locked'));
+
+      final result = await engine.runSync(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(result.updated, isEmpty);
+      expect(result.errors, hasLength(1));
+      verify(() => calendarService.deleteEvent('new-id-2')).called(1);
+      verifyNever(() => calendarService.deleteEvent('tgt-1'));
+    });
+
+    test('create path: mapping save fails -> created event removed', () async {
+      when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
+        (_) async => [_makeEvent('src-1', start: start, end: end)],
+      );
+      when(() => mappingDb.listMappingsForCalendar(profileId, sourceCalId))
+          .thenAnswer((_) async => []);
+      when(() => mappingDb.isEventCreatedBySync(sourceCalId, 'src-1'))
+          .thenAnswer((_) async => false);
+      when(() => mappingDb.isEventSynced(profileId, sourceCalId, 'src-1'))
+          .thenAnswer((_) async => false);
+      when(() => calendarService.createEvent(
+        targetCalId, syncName, start, end,
+        description: 'Test Event\n---\n🔃 Automatically created by CalSync',
+        isAllDay: false,
+      )).thenAnswer((_) async => 'new-id');
+      when(() => calendarService.deleteEvent('new-id'))
+          .thenAnswer((_) async => const CalendarDeleteResult(success: true));
+      when(() => mappingDb.insertMapping(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId, sourceEventId: 'src-1',
+        targetCalendarId: targetCalId, targetEventId: 'new-id',
+        syncedAt: any(named: 'syncedAt'),
+        canonicalTime: any(named: 'canonicalTime'),
+      )).thenThrow(Exception('database is locked'));
+
+      final result = await engine.runSync(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(result.synced, isEmpty);
+      expect(result.errors, hasLength(1));
+      verify(() => calendarService.deleteEvent('new-id')).called(1);
+    });
+
     test('delete path: deleteEvent and deleteMapping are called', () async {
       when(() => calendarService.listEvents(sourceCalId))
           .thenAnswer((_) async => []);

@@ -218,11 +218,22 @@ class MappingDatabase {
   }) async {
     final db = await database;
     final now = DateTime.now().toUtc();
+    final staleBefore = now.subtract(staleAfter).toIso8601String();
+
+    // Check with a plain read first so waiting syncs don't compete with the
+    // running one for the write lock.
+    final current = await db.query(_lockTable);
+    if (current.isNotEmpty &&
+        current.first['owner'] != owner &&
+        (current.first['acquired_at'] as String).compareTo(staleBefore) >= 0) {
+      return false;
+    }
+
     return db.transaction((txn) async {
       await txn.delete(
         _lockTable,
         where: 'acquired_at < ?',
-        whereArgs: [now.subtract(staleAfter).toIso8601String()],
+        whereArgs: [staleBefore],
       );
       await txn.insert(
         _lockTable,

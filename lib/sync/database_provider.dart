@@ -29,6 +29,9 @@ class DatabaseProvider {
       singleInstance: false,
       onConfigure: (db) async {
         await db.rawQuery('PRAGMA journal_mode=WAL');
+        // Background syncs and the UI open separate connections; wait for
+        // the other writer instead of failing with SQLITE_BUSY.
+        await db.rawQuery('PRAGMA busy_timeout = 10000');
       },
       onCreate: (db, version) async {
         await db.execute('''
