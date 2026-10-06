@@ -1,0 +1,44 @@
+name: Test build
+
+on:
+  push:
+    branches-ignore: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  flutter-version: "3.47.0"
+
+jobs:
+  test-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.flutter-version }}
+          cache: true
+
+      - name: Install dependencies
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      - name: Test
+        run: flutter test
+
+      - name: Build fdroid debug APK
+        if: success() || failure()
+        run: flutter build apk --debug
+
+      - name: Upload APK
+        if: success() || failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calsync-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          if-no-files-found: ignore
