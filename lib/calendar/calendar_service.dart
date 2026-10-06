@@ -13,16 +13,23 @@ class CalendarService {
     }
   }
 
-  Future<List<Event>> listEvents(String calendarId) async {
+  /// How far ahead of now [listEvents] looks.
+  static const syncWindow = Duration(days: 30);
+
+  /// Lists events from now until now + [syncWindow].
+  ///
+  /// Returns null when the calendar could not be read, so callers can tell
+  /// a failed read apart from an empty calendar.
+  Future<List<Event>?> listEvents(String calendarId) async {
     final now = DateTime.now();
     try {
       return await _plugin.listEvents(
         now,
-        now.add(const Duration(days: 30)),
+        now.add(syncWindow),
         calendarIds: [calendarId],
       );
     } on DeviceCalendarException {
-      return [];
+      return null;
     }
   }
 
@@ -57,6 +64,22 @@ class CalendarService {
       return await _plugin.getEvent(eventId);
     } on DeviceCalendarException {
       return null;
+    }
+  }
+
+  /// Whether the event row is gone or flagged as deleted by its sync adapter.
+  ///
+  /// Returns false when the check itself fails, so callers fall back to
+  /// treating the event as alive.
+  Future<bool> isEventDeleted(String eventId) async {
+    try {
+      final deleted = await _channel.invokeMethod<bool>(
+        'isEventDeleted',
+        {'eventId': eventId},
+      );
+      return deleted == true;
+    } catch (_) {
+      return false;
     }
   }
 

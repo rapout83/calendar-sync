@@ -51,13 +51,16 @@ void main() {
   final syncName = 'Busy';
   final profileId = 'test-profile';
 
+  final now = DateTime.utc(2026, 10, 1, 12);
   final futureEnd = DateTime.utc(2027, 1, 1);
   final oldEnd = DateTime.utc(2020, 1, 1);
 
   setUp(() {
     calendarService = MockCalendarService();
     mappingDb = MockMappingDatabase();
-    engine = SyncEngine(calendarService, mappingDb);
+    engine = SyncEngine(calendarService, mappingDb, clock: () => now);
+    when(() => calendarService.isEventDeleted(any()))
+        .thenAnswer((_) async => false);
   });
 
   group('Deletion pass 7-day threshold + source-by-ID', () {
@@ -284,6 +287,231 @@ void main() {
       expect(plan.toUpdate, hasLength(1));
       expect(plan.toUpdate.first.sourceEvent.eventId, 'src-1');
       verify(() => calendarService.getEvent('src-1')).called(1);
+    });
+  });
+
+  group('Replaced source events (Outlook/Exchange new IDs)', () {
+    final inWindowStart = now.add(const Duration(days: 3));
+    final inWindowEnd = inWindowStart.add(const Duration(hours: 1));
+
+    Event targetEvent(String id) => Event(
+          eventId: id,
+          instanceId: id,
+          calendarId: targetCalId,
+          title: 'Busy',
+          description: 'Test Event\n---\n🔃 Automatically created by CalSync',
+          startDate: inWindowStart,
+          endDate: inWindowEnd,
+          isAllDay: false,
+          availability: EventAvailability.busy,
+          status: EventStatus.none,
+          isRecurring: false,
+        );
+
+    void stubOldMapping() {
+      when(() => mappingDb.listMappingsForCalendar(profileId, sourceCalId))
+          .thenAnswer(
+        (_) async => [
+          {
+            'id': 1,
+            'source_event_id': 'src-old',
+            'target_event_id': 'tgt-old',
+            'target_calendar_id': targetCalId,
+          },
+        ],
+      );
+      when(() => calendarService.getEvent('tgt-old'))
+          .thenAnswer((_) async => targetEvent('tgt-old'));
+    }
+
+    void stubNewSourceUnsynced() {
+      when(() => mappingDb.isEventCreatedBySync(sourceCalId, 'src-new'))
+          .thenAnswer((_) async => false);
+      when(() => mappingDb.isEventSynced(profileId, sourceCalId, 'src-new'))
+          .thenAnswer((_) async => false);
+    }
+
+    test('old ID flagged deleted but still fetchable -> delete + create',
+        () async {
+      when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
+        (_) async => [
+          _makeEvent('src-new', start: inWindowStart, end: inWindowEnd),
+        ],
+      );
+      stubOldMapping();
+      stubNewSourceUnsynced();
+      when(() => calendarService.getEvent('src-old')).thenAnswer(
+        (_) async =>
+            _makeEvent('src-old', start: inWindowStart, end: inWindowEnd),
+      );
+      when(() => calendarService.isEventDeleted('src-old'))
+          .thenAnswer((_) async => true);
+
+      final plan = await engine.runDryRun(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(plan.toDelete, hasLength(1));
+      expect(plan.toDelete.first['source_event_id'], 'src-old');
+      expect(plan.toCreate, hasLength(1));
+      expect(plan.toCreate.first.sourceEvent.eventId, 'src-new');
+      expect(plan.toUpdate, isEmpty);
+      expect(plan.toSkip.any((e) => e.eventId == 'src-old'), isFalse);
+    });
+
+    test('old ID not flagged but missing from listing inside window -> deleted',
+        () async {
+      when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
+        (_) async => [
+          _makeEvent('src-new', start: inWindowStart, end: inWindowEnd),
+        ],
+      );
+      stubOldMapping();
+      stubNewSourceUnsynced();
+      when(() => calendarService.getEvent('src-old')).thenAnswer(
+        (_) async =>
+            _makeEvent('src-old', start: inWindowStart, end: inWindowEnd),
+      );
+
+      final plan = await engine.runDryRun(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(plan.toDelete, hasLength(1));
+      expect(plan.toDelete.first['source_event_id'], 'src-old');
+      expect(plan.toCreate, hasLength(1));
+    });
+
+    test('existing pile of duplicates is cleaned up in one run', () async {
+      when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
+        (_) async => [
+          _makeEvent('src-3', start: inWindowStart, end: inWindowEnd),
+        ],
+      );
+      when(() => mappingDb.listMappingsForCalendar(profileId, sourceCalId))
+          .thenAnswer(
+        (_) async => [
+          for (var i = 1; i <= 3; i++)
+            {
+              'id': i,
+              'source_event_id': 'src-$i',
+              'target_event_id': 'tgt-$i',
+              'target_calendar_id': targetCalId,
+            },
+        ],
+      );
+      for (var i = 1; i <= 3; i++) {
+        when(() => calendarService.getEvent('tgt-$i'))
+            .thenAnswer((_) async => targetEvent('tgt-$i'));
+      }
+      for (var i = 1; i <= 2; i++) {
+        when(() => calendarService.getEvent('src-$i')).thenAnswer(
+          (_) async =>
+              _makeEvent('src-$i', start: inWindowStart, end: inWindowEnd),
+        );
+        when(() => calendarService.isEventDeleted('src-$i'))
+            .thenAnswer((_) async => true);
+      }
+      when(() => mappingDb.isEventCreatedBySync(sourceCalId, 'src-3'))
+          .thenAnswer((_) async => false);
+      when(() => mappingDb.isEventSynced(profileId, sourceCalId, 'src-3'))
+          .thenAnswer((_) async => true);
+
+      final plan = await engine.runDryRun(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(
+        plan.toDelete.map((m) => m['source_event_id']),
+        unorderedEquals(['src-1', 'src-2']),
+      );
+      expect(plan.toCreate, isEmpty);
+      expect(plan.toSkip.any((e) => e.eventId == 'src-3'), isTrue);
+    });
+
+    test('event moved beyond the window is kept, not deleted', () async {
+      when(() => calendarService.listEvents(sourceCalId))
+          .thenAnswer((_) async => []);
+      stubOldMapping();
+      final farStart = now.add(const Duration(days: 45));
+      when(() => calendarService.getEvent('src-old')).thenAnswer(
+        (_) async => _makeEvent('src-old',
+            start: farStart, end: farStart.add(const Duration(hours: 1))),
+      );
+      when(() => mappingDb.isEventCreatedBySync(sourceCalId, 'src-old'))
+          .thenAnswer((_) async => false);
+      when(() => mappingDb.isEventSynced(profileId, sourceCalId, 'src-old'))
+          .thenAnswer((_) async => true);
+
+      final plan = await engine.runDryRun(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(plan.toDelete, isEmpty);
+      expect(plan.toUpdate, hasLength(1));
+    });
+
+    test('recurring series without instances in window is kept', () async {
+      when(() => calendarService.listEvents(sourceCalId))
+          .thenAnswer((_) async => []);
+      stubOldMapping();
+      when(() => calendarService.getEvent('src-old')).thenAnswer(
+        (_) async => Event(
+          eventId: 'src-old',
+          instanceId: 'src-old',
+          calendarId: sourceCalId,
+          title: 'Test Event',
+          startDate: inWindowStart,
+          endDate: inWindowEnd,
+          isAllDay: false,
+          availability: EventAvailability.busy,
+          status: EventStatus.none,
+          isRecurring: true,
+        ),
+      );
+      when(() => mappingDb.isEventCreatedBySync(sourceCalId, 'src-old'))
+          .thenAnswer((_) async => false);
+      when(() => mappingDb.isEventSynced(profileId, sourceCalId, 'src-old'))
+          .thenAnswer((_) async => true);
+
+      final plan = await engine.runDryRun(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(plan.toDelete, isEmpty);
+    });
+
+    test('failed source listing -> error, nothing deleted', () async {
+      when(() => calendarService.listEvents(sourceCalId))
+          .thenAnswer((_) async => null);
+      stubOldMapping();
+
+      final result = await engine.runSync(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(result.errors, hasLength(1));
+      expect(result.deleted, isEmpty);
+      verifyNever(() => calendarService.deleteEvent(any()));
+      verifyNever(() => mappingDb.listMappingsForCalendar(any(), any()));
     });
   });
 

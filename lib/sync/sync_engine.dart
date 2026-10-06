@@ -74,8 +74,13 @@ class ToUpdateEntry {
 class SyncEngine {
   final CalendarService _calendarService;
   final MappingDatabase _mappingDb;
+  final DateTime Function() _clock;
 
-  SyncEngine(this._calendarService, this._mappingDb);
+  SyncEngine(
+    this._calendarService,
+    this._mappingDb, {
+    DateTime Function()? clock,
+  }) : _clock = clock ?? DateTime.now;
 
   Future<SyncResult> runSync({
     required String profileId,
@@ -147,6 +152,7 @@ class SyncEngine {
     required List<Event> sourceEvents,
     required List<Map<String, Object?>> toDelete,
     required List<String> errors,
+    required DateTime listedAt,
   }) async {
     for (final mapping in mappings) {
       final sourceEventId = mapping['source_event_id'] as String;
@@ -168,7 +174,7 @@ class SyncEngine {
             continue;
           }
 
-          final threshold = DateTime.now().subtract(const Duration(days: 7));
+          final threshold = _clock().subtract(const Duration(days: 7));
           if (targetEvent.endDate.isBefore(threshold)) {
             continue;
           }
@@ -177,16 +183,54 @@ class SyncEngine {
             sourceEventId,
           );
 
-          if (sourceEvent != null) {
-            sourceEvents.add(sourceEvent);
-          } else {
+          if (sourceEvent == null ||
+              await _isStaleSource(sourceEvent, sourceEventId, listedAt)) {
             toDelete.add(mapping);
+          } else {
+            sourceEvents.add(sourceEvent);
           }
         } catch (e) {
           errors.add('$sourceEventId: $e');
         }
       }
     }
+  }
+
+  /// Whether a source event that was missing from the listing is a leftover
+  /// that should be treated as deleted, even though it can still be fetched
+  /// by ID.
+  ///
+  /// Some sync adapters (notably Outlook/Exchange) replace an event on every
+  /// change: the old row is flagged deleted (or dropped from instances) and a
+  /// new row with a new ID is inserted. Fetching the old ID still returns it,
+  /// so without this check the old mapping is kept alive while the new ID is
+  /// synced again, piling up duplicates in the target calendar.
+  Future<bool> _isStaleSource(
+    Event sourceEvent,
+    String sourceEventId,
+    DateTime listedAt,
+  ) async {
+    if (await _calendarService.isEventDeleted(sourceEventId)) {
+      return true;
+    }
+
+    // A recurring series can legitimately have no instance in the window
+    // while still being alive, so only the explicit deleted flag counts.
+    if (sourceEvent.isRecurring || sourceEvent.recurrenceRule != null) {
+      return false;
+    }
+
+    // A one-off event that overlaps the listed window should have been
+    // listed. If it was not, the calendar no longer considers it live.
+    // Margins absorb clock drift between listing and now, and all-day
+    // events being stored in UTC.
+    final margin = sourceEvent.isAllDay
+        ? const Duration(days: 1)
+        : const Duration(minutes: 5);
+    final windowStart = listedAt.add(margin);
+    final windowEnd = listedAt.add(CalendarService.syncWindow).subtract(margin);
+    return sourceEvent.endDate.isAfter(windowStart) &&
+        sourceEvent.startDate.isBefore(windowEnd);
   }
 
   Future<SyncPlan> _classify({
@@ -204,7 +248,20 @@ class SyncEngine {
     final errors = <String>[];
     final processedIds = <String>{};
 
-    final sourceEvents = await _calendarService.listEvents(sourceCalendarId);
+    final listedAt = _clock();
+    final listed = await _calendarService.listEvents(sourceCalendarId);
+    if (listed == null) {
+      // Without the source listing every mapping would look orphaned, so
+      // bail out instead of deleting synced events.
+      return SyncPlan(
+        toCreate: toCreate,
+        toUpdate: toUpdate,
+        toSkip: toSkip,
+        toDelete: toDelete,
+        errors: ['$sourceCalendarId: failed to list source events'],
+      );
+    }
+    final sourceEvents = List<Event>.of(listed);
 
     final mappings = await _mappingDb.listMappingsForCalendar(
       profileId,
@@ -222,6 +279,7 @@ class SyncEngine {
       sourceEvents: sourceEvents,
       toDelete: toDelete,
       errors: errors,
+      listedAt: listedAt,
     );
 
     for (final event in sourceEvents) {
