@@ -14,6 +14,59 @@ void main() {
     db = await mappingDb.database;
 
     await db.delete('sync_status');
+    await db.delete('sync_lock');
+    await db.delete('sync_log');
+  });
+
+  group('Sync lock', () {
+    test('only one owner holds the lock until it is released', () async {
+      expect(await mappingDb.tryAcquireSyncLock('a'), isTrue);
+      expect(await mappingDb.tryAcquireSyncLock('b'), isFalse);
+
+      await mappingDb.releaseSyncLock('b');
+      expect(await mappingDb.tryAcquireSyncLock('b'), isFalse);
+
+      await mappingDb.releaseSyncLock('a');
+      expect(await mappingDb.tryAcquireSyncLock('b'), isTrue);
+    });
+
+    test('stale lock is taken over', () async {
+      await db.insert('sync_lock', {
+        'id': 1,
+        'owner': 'dead',
+        'acquired_at': DateTime.now()
+            .toUtc()
+            .subtract(const Duration(minutes: 11))
+            .toIso8601String(),
+      });
+
+      expect(await mappingDb.tryAcquireSyncLock('b'), isTrue);
+    });
+  });
+
+  group('Sync log', () {
+    test('entries are returned newest first and can be cleared', () async {
+      await mappingDb.appendSyncLog('prof-1', 'first');
+      await mappingDb.appendSyncLog('prof-1', 'second');
+
+      final log = await mappingDb.getSyncLog();
+      expect(log.map((e) => e['message']), ['second', 'first']);
+
+      await mappingDb.clearSyncLog();
+      expect(await mappingDb.getSyncLog(), isEmpty);
+    });
+
+    test('log is capped', () async {
+      for (var i = 0; i < 1100; i++) {
+        await mappingDb.appendSyncLog('prof-1', 'line $i');
+      }
+
+      final count = (await db.rawQuery('SELECT COUNT(*) AS c FROM sync_log'))
+          .first['c'] as int;
+      expect(count, lessThanOrEqualTo(1050));
+      final newest = await mappingDb.getSyncLog(limit: 1);
+      expect(newest.first['message'], 'line 1099');
+    });
   });
 
   group('Status history', () {

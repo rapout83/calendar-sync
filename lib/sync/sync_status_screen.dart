@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../settings/profile_service.dart';
 import '../widgets/empty_state.dart';
 import 'mapping_database.dart';
+import 'sync_log_screen.dart';
 
 class SyncStatusScreen extends StatefulWidget {
   const SyncStatusScreen({super.key});
@@ -79,6 +80,14 @@ class _SyncStatusScreenState extends State<SyncStatusScreen> {
       appBar: AppBar(
         title: const Text('Sync History'),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.notes),
+            tooltip: 'Detailed log',
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const SyncLogScreen()),
+            ),
+          ),
           IconButton(
             icon: const Icon(Icons.refresh),
             onPressed: _load,

@@ -1,4 +1,5 @@
 import 'dart:collection';
+import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:device_calendar_plus/device_calendar_plus.dart';
@@ -75,13 +76,26 @@ class SyncEngine {
   final CalendarService _calendarService;
   final MappingDatabase _mappingDb;
   final DateTime Function() _clock;
+  final Duration _lockTimeout;
+  final Duration _lockPollInterval;
 
   SyncEngine(
     this._calendarService,
     this._mappingDb, {
     DateTime Function()? clock,
-  }) : _clock = clock ?? DateTime.now;
+    Duration lockTimeout = const Duration(minutes: 5),
+    Duration lockPollInterval = const Duration(seconds: 2),
+  })  : _clock = clock ?? DateTime.now,
+        _lockTimeout = lockTimeout,
+        _lockPollInterval = lockPollInterval;
 
+  /// Runs one sync while holding the shared sync lock.
+  ///
+  /// Syncs are started by calendar-change jobs, the periodic job and the
+  /// UI, each in its own isolate. Two overlapping syncs would both see a new
+  /// source event as unsynced and both create it, and the second mapping
+  /// would overwrite the first, leaving an untracked duplicate behind. The
+  /// lock makes them run one after another instead.
   Future<SyncResult> runSync({
     required String profileId,
     required String sourceCalendarId,
@@ -90,6 +104,92 @@ class SyncEngine {
     bool copyDescription = false,
     bool copyLocation = false,
     bool omitSourceTitle = false,
+    String trigger = 'manual',
+  }) async {
+    final owner =
+        '${DateTime.now().microsecondsSinceEpoch}-${Random().nextInt(1 << 32)}';
+    if (!await _acquireLock(owner, profileId)) {
+      await _log(profileId, 'SKIP run ($trigger): another sync still running');
+      return SyncResult(
+        synced: UnmodifiableListView([]),
+        skipped: UnmodifiableListView([]),
+        deleted: UnmodifiableListView([]),
+        updated: UnmodifiableListView([]),
+        errors: UnmodifiableListView(['another sync is still running']),
+      );
+    }
+    try {
+      await _log(profileId, 'START run ($trigger)');
+      final result = await _runSyncLocked(
+        profileId: profileId,
+        sourceCalendarId: sourceCalendarId,
+        targetCalendarId: targetCalendarId,
+        syncEventName: syncEventName,
+        copyDescription: copyDescription,
+        copyLocation: copyLocation,
+        omitSourceTitle: omitSourceTitle,
+      );
+      for (final error in result.errors) {
+        await _log(profileId, 'ERROR $error');
+      }
+      await _log(
+        profileId,
+        'END run: ${result.synced.length} created, '
+        '${result.updated.length} updated, ${result.deleted.length} deleted, '
+        '${result.skipped.length} skipped, ${result.errors.length} errors',
+      );
+      return result;
+    } finally {
+      try {
+        await _mappingDb.releaseSyncLock(owner);
+      } catch (_) {}
+    }
+  }
+
+  Future<bool> _acquireLock(String owner, String profileId) async {
+    final waited = Stopwatch()..start();
+    var loggedWait = false;
+    while (true) {
+      try {
+        if (await _mappingDb.tryAcquireSyncLock(owner)) {
+          return true;
+        }
+      } catch (_) {
+        // Database busy with another isolate's write; retry.
+      }
+      if (waited.elapsed >= _lockTimeout) {
+        return false;
+      }
+      if (!loggedWait) {
+        loggedWait = true;
+        await _log(profileId, 'WAIT for another sync to finish');
+      }
+      await Future<void>.delayed(_lockPollInterval);
+    }
+  }
+
+  Future<void> _log(String profileId, String message) async {
+    try {
+      await _mappingDb.appendSyncLog(profileId, message);
+    } catch (_) {
+      // Logging must never break a sync.
+    }
+  }
+
+  static String _describe(Event event) {
+    final start = event.startDate.toLocal().toIso8601String();
+    final when = start.length >= 16 ? start.substring(0, 16) : start;
+    return 'src=${event.eventId} "${event.title}" $when';
+  }
+
+  Future<SyncResult> _runSyncLocked({
+    required String profileId,
+    required String sourceCalendarId,
+    required String targetCalendarId,
+    required String syncEventName,
+    required bool copyDescription,
+    required bool copyLocation,
+    required bool omitSourceTitle,
   }) async {
     final plan = await _classify(
       profileId: profileId,
@@ -165,6 +265,11 @@ class SyncEngine {
           );
 
           if (targetEvent == null) {
+            await _log(
+              profileId,
+              'FORGET src=$sourceEventId: synced copy tgt=$targetEventId '
+              'no longer exists',
+            );
             final mappingId = mapping['id'] as int;
             await _mappingDb.deleteMapping(mappingId);
             await _mappingDb.deleteCreatedEvent(
@@ -183,9 +288,11 @@ class SyncEngine {
             sourceEventId,
           );
 
-          if (sourceEvent == null ||
-              await _isStaleSource(sourceEvent, sourceEventId, listedAt)) {
-            toDelete.add(mapping);
+          final staleReason = sourceEvent == null
+              ? 'source event no longer exists'
+              : await _staleSourceReason(sourceEvent, sourceEventId, listedAt);
+          if (staleReason != null) {
+            toDelete.add({...mapping, 'delete_reason': staleReason});
           } else {
             sourceEvents.add(sourceEvent);
           }
@@ -205,19 +312,21 @@ class SyncEngine {
   /// new row with a new ID is inserted. Fetching the old ID still returns it,
   /// so without this check the old mapping is kept alive while the new ID is
   /// synced again, piling up duplicates in the target calendar.
-  Future<bool> _isStaleSource(
+  ///
+  /// Returns why the event counts as stale, or null if it is still alive.
+  Future<String?> _staleSourceReason(
     Event sourceEvent,
     String sourceEventId,
     DateTime listedAt,
   ) async {
     if (await _calendarService.isEventDeleted(sourceEventId)) {
-      return true;
+      return 'source event flagged deleted';
     }
 
     // A recurring series can legitimately have no instance in the window
     // while still being alive, so only the explicit deleted flag counts.
     if (sourceEvent.isRecurring || sourceEvent.recurrenceRule != null) {
-      return false;
+      return null;
     }
 
     // A one-off event that overlaps the listed window should have been
@@ -229,8 +338,9 @@ class SyncEngine {
         : const Duration(minutes: 5);
     final windowStart = listedAt.add(margin);
     final windowEnd = listedAt.add(CalendarService.syncWindow).subtract(margin);
-    return sourceEvent.endDate.isAfter(windowStart) &&
+    final inWindow = sourceEvent.endDate.isAfter(windowStart) &&
         sourceEvent.startDate.isBefore(windowEnd);
+    return inWindow ? 'source event no longer listed in sync window' : null;
   }
 
   Future<SyncPlan> _classify({
@@ -491,6 +601,11 @@ class SyncEngine {
 
         await _mappingDb.deleteMapping(mappingId);
         await _mappingDb.deleteCreatedEvent(targetCalId, targetEventId);
+        await _log(
+          profileId,
+          'DELETE src=$sourceEventId tgt=$targetEventId '
+          '(${entry['delete_reason'] ?? 'source gone'})',
+        );
         deleted.add(sourceEventId);
       } catch (e) {
         errors.add('$sourceEventId: delete failed: $e');
@@ -502,6 +617,18 @@ class SyncEngine {
       final eventId = event.eventId;
 
       try {
+        // Last guard against a duplicate: the plan may be stale if the
+        // mapping was written after classification.
+        if (await _mappingDb.isEventSynced(
+          profileId,
+          sourceCalendarId,
+          eventId,
+        )) {
+          await _log(profileId, 'SKIP create ${_describe(event)}: already synced');
+          skipped.add(eventId);
+          continue;
+        }
+
         final hasRecurrence = event.isRecurring && event.recurrenceRule != null;
         final targetEventId = await _calendarService.createEvent(
           targetCalendarId,
@@ -543,6 +670,7 @@ class SyncEngine {
           targetEventId,
         );
 
+        await _log(profileId, 'CREATE ${_describe(event)} -> tgt=$targetEventId');
         synced.add(eventId);
       } catch (e) {
         errors.add('$eventId: $e');
@@ -606,6 +734,10 @@ class SyncEngine {
           newTargetEventId,
         );
 
+        await _log(
+          profileId,
+          'UPDATE ${_describe(event)} tgt=$targetEventId -> $newTargetEventId',
+        );
         updated.add(eventId);
       } catch (e) {
         errors.add('$eventId: $e');

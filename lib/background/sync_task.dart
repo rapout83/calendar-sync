@@ -69,6 +69,7 @@ void callbackDispatcher() {
             copyDescription: profile.copyDescription,
             copyLocation: profile.copyLocation,
             omitSourceTitle: profile.omitSourceTitle,
+            trigger: 'background',
           );
 
 

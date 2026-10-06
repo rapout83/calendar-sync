@@ -25,7 +25,7 @@ class DatabaseProvider {
     final path = join(dbPath, name);
     final db = await openDatabase(
       path,
-      version: 8,
+      version: 9,
       singleInstance: false,
       onConfigure: (db) async {
         await db.rawQuery('PRAGMA journal_mode=WAL');
@@ -77,6 +77,7 @@ class DatabaseProvider {
             UNIQUE(calendar_id, event_id)
           )
         ''');
+        await _createV9Tables(db);
       },
       onUpgrade: (db, oldVersion, newVersion) async {
         if (oldVersion < 2) {
@@ -145,8 +146,29 @@ class DatabaseProvider {
         if (oldVersion < 8) {
           await db.execute('ALTER TABLE sync_profiles ADD COLUMN omit_source_title INTEGER NOT NULL DEFAULT 0');
         }
+        if (oldVersion < 9) {
+          await _createV9Tables(db);
+        }
       },
     );
     return db;
+  }
+
+  static Future<void> _createV9Tables(Database db) async {
+    await db.execute('''
+          CREATE TABLE IF NOT EXISTS sync_lock (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            owner TEXT NOT NULL,
+            acquired_at TEXT NOT NULL
+          )
+        ''');
+    await db.execute('''
+          CREATE TABLE IF NOT EXISTS sync_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp TEXT NOT NULL,
+            profile_id TEXT NOT NULL DEFAULT '',
+            message TEXT NOT NULL
+          )
+        ''');
   }
 }

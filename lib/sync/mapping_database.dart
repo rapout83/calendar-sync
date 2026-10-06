@@ -202,6 +202,69 @@ class MappingDatabase {
     );
   }
 
+  static const _lockTable = 'sync_lock';
+  static const _logTable = 'sync_log';
+  static const _maxLogRows = 1000;
+
+  /// Takes the single cross-isolate sync lock for [owner].
+  ///
+  /// Background jobs and the UI run syncs in separate isolates with their
+  /// own database connections, so the lock lives in the shared database.
+  /// A lock older than [staleAfter] is assumed to belong to a sync that was
+  /// killed and is taken over.
+  Future<bool> tryAcquireSyncLock(
+    String owner, {
+    Duration staleAfter = const Duration(minutes: 10),
+  }) async {
+    final db = await database;
+    final now = DateTime.now().toUtc();
+    return db.transaction((txn) async {
+      await txn.delete(
+        _lockTable,
+        where: 'acquired_at < ?',
+        whereArgs: [now.subtract(staleAfter).toIso8601String()],
+      );
+      await txn.insert(
+        _lockTable,
+        {'id': 1, 'owner': owner, 'acquired_at': now.toIso8601String()},
+        conflictAlgorithm: ConflictAlgorithm.ignore,
+      );
+      final rows = await txn.query(_lockTable, columns: ['owner']);
+      return rows.isNotEmpty && rows.first['owner'] == owner;
+    });
+  }
+
+  Future<void> releaseSyncLock(String owner) async {
+    final db = await database;
+    await db.delete(_lockTable, where: 'owner = ?', whereArgs: [owner]);
+  }
+
+  Future<void> appendSyncLog(String profileId, String message) async {
+    final db = await database;
+    final id = await db.insert(_logTable, {
+      'timestamp': DateTime.now().toIso8601String(),
+      'profile_id': profileId,
+      'message': message,
+    });
+    if (id % 50 == 0) {
+      await db.delete(
+        _logTable,
+        where: 'id <= ?',
+        whereArgs: [id - _maxLogRows],
+      );
+    }
+  }
+
+  Future<List<Map<String, Object?>>> getSyncLog({int limit = _maxLogRows}) async {
+    final db = await database;
+    return db.query(_logTable, orderBy: 'id DESC', limit: limit);
+  }
+
+  Future<void> clearSyncLog() async {
+    final db = await database;
+    await db.delete(_logTable);
+  }
+
   Future<List<Map<String, Object?>>> listMappingsForProfile(
     String profileId,
   ) async {

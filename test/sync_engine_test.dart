@@ -61,6 +61,109 @@ void main() {
     engine = SyncEngine(calendarService, mappingDb, clock: () => now);
     when(() => calendarService.isEventDeleted(any()))
         .thenAnswer((_) async => false);
+    when(() => mappingDb.tryAcquireSyncLock(any()))
+        .thenAnswer((_) async => true);
+    when(() => mappingDb.releaseSyncLock(any())).thenAnswer((_) async {});
+    when(() => mappingDb.appendSyncLog(any(), any()))
+        .thenAnswer((_) async {});
+  });
+
+  group('Sync lock', () {
+    test('runs after waiting for the lock, then releases it', () async {
+      var attempts = 0;
+      when(() => mappingDb.tryAcquireSyncLock(any()))
+          .thenAnswer((_) async => ++attempts >= 3);
+      when(() => calendarService.listEvents(sourceCalId))
+          .thenAnswer((_) async => []);
+      when(() => mappingDb.listMappingsForCalendar(profileId, sourceCalId))
+          .thenAnswer((_) async => []);
+      engine = SyncEngine(
+        calendarService,
+        mappingDb,
+        clock: () => now,
+        lockPollInterval: Duration.zero,
+      );
+
+      final result = await engine.runSync(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(result.errors, isEmpty);
+      expect(attempts, 3);
+      verify(() => calendarService.listEvents(sourceCalId)).called(1);
+      verify(() => mappingDb.releaseSyncLock(any())).called(1);
+    });
+
+    test('gives up without touching calendars when lock never frees', () async {
+      when(() => mappingDb.tryAcquireSyncLock(any()))
+          .thenAnswer((_) async => false);
+      engine = SyncEngine(
+        calendarService,
+        mappingDb,
+        clock: () => now,
+        lockTimeout: Duration.zero,
+        lockPollInterval: Duration.zero,
+      );
+
+      final result = await engine.runSync(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(result.errors, hasLength(1));
+      verifyNever(() => calendarService.listEvents(any()));
+      verifyNever(() => mappingDb.releaseSyncLock(any()));
+    });
+
+    test('lock is released when the sync throws', () async {
+      when(() => calendarService.listEvents(sourceCalId))
+          .thenThrow(Exception('boom'));
+
+      await expectLater(
+        engine.runSync(
+          profileId: profileId,
+          sourceCalendarId: sourceCalId,
+          targetCalendarId: targetCalId,
+          syncEventName: syncName,
+        ),
+        throwsException,
+      );
+      verify(() => mappingDb.releaseSyncLock(any())).called(1);
+    });
+
+    test('create is skipped when mapping appeared after classification',
+        () async {
+      final start = now.add(const Duration(days: 2));
+      when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
+        (_) async => [
+          _makeEvent('src-1', start: start, end: start.add(const Duration(hours: 1))),
+        ],
+      );
+      when(() => mappingDb.listMappingsForCalendar(profileId, sourceCalId))
+          .thenAnswer((_) async => []);
+      when(() => mappingDb.isEventCreatedBySync(sourceCalId, 'src-1'))
+          .thenAnswer((_) async => false);
+      var checks = 0;
+      when(() => mappingDb.isEventSynced(profileId, sourceCalId, 'src-1'))
+          .thenAnswer((_) async => ++checks > 1);
+
+      final result = await engine.runSync(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      // createEvent is not stubbed, so calling it would surface as an error.
+      expect(result.errors, isEmpty);
+      expect(result.synced, isEmpty);
+      expect(result.skipped, contains('src-1'));
+    });
   });
 
   group('Deletion pass 7-day threshold + source-by-ID', () {
