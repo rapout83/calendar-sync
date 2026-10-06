@@ -76,18 +76,16 @@ class SyncEngine {
   final CalendarService _calendarService;
   final MappingDatabase _mappingDb;
   final DateTime Function() _clock;
-  final Duration _lockTimeout;
-  final Duration _lockPollInterval;
+  final Duration lockTimeout;
+  final Duration lockPollInterval;
 
   SyncEngine(
     this._calendarService,
     this._mappingDb, {
     DateTime Function()? clock,
-    Duration lockTimeout = const Duration(minutes: 5),
-    Duration lockPollInterval = const Duration(seconds: 2),
-  })  : _clock = clock ?? DateTime.now,
-        _lockTimeout = lockTimeout,
-        _lockPollInterval = lockPollInterval;
+    this.lockTimeout = const Duration(minutes: 5),
+    this.lockPollInterval = const Duration(seconds: 2),
+  }) : _clock = clock ?? DateTime.now;
 
   /// Runs one sync while holding the shared sync lock.
   ///
@@ -157,14 +155,14 @@ class SyncEngine {
       } catch (_) {
         // Database busy with another isolate's write; retry.
       }
-      if (waited.elapsed >= _lockTimeout) {
+      if (waited.elapsed >= lockTimeout) {
         return false;
       }
       if (!loggedWait) {
         loggedWait = true;
         await _log(profileId, 'WAIT for another sync to finish');
       }
-      await Future<void>.delayed(_lockPollInterval);
+      await Future<void>.delayed(lockPollInterval);
     }
   }
 
@@ -288,9 +286,13 @@ class SyncEngine {
             sourceEventId,
           );
 
-          final staleReason = sourceEvent == null
-              ? 'source event no longer exists'
-              : await _staleSourceReason(sourceEvent, sourceEventId, listedAt);
+          if (sourceEvent == null) {
+            toDelete.add(
+                {...mapping, 'delete_reason': 'source event no longer exists'});
+            continue;
+          }
+          final staleReason =
+              await _staleSourceReason(sourceEvent, sourceEventId, listedAt);
           if (staleReason != null) {
             toDelete.add({...mapping, 'delete_reason': staleReason});
           } else {
