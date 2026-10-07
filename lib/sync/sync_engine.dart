@@ -64,6 +64,7 @@ class SyncPlan {
   final List<ToUpdateEntry> toUpdate;
   final List<Event> toSkip;
   final List<Map<String, Object?>> toDelete;
+  final List<ToRelinkEntry> toRelink;
   final List<String> errors;
 
   const SyncPlan({
@@ -71,9 +72,27 @@ class SyncPlan {
     required this.toUpdate,
     required this.toSkip,
     required this.toDelete,
+    this.toRelink = const [],
     required this.errors,
   });
 }
+
+/// A mapping whose source event was replaced by the calendar with an
+/// identical event under a new ID; the existing target is kept and the
+/// mapping is pointed at the new ID.
+class ToRelinkEntry {
+  final Map<String, Object?> mapping;
+  final Event sourceEvent;
+
+  const ToRelinkEntry({required this.mapping, required this.sourceEvent});
+}
+
+/// Identity of an event's content, used to recognise the same event under a
+/// different ID. Outlook/Exchange re-creates events with new IDs and can
+/// keep the old one alive alongside the new one for a while.
+String _contentKey(Event event) =>
+    '${event.title}|${event.startDate.millisecondsSinceEpoch}|'
+    '${event.endDate.millisecondsSinceEpoch}|${event.isAllDay}';
 
 class ToCreateEntry {
   final Event sourceEvent;
@@ -248,6 +267,29 @@ class SyncEngine {
             '${_sourceTitleLine(event.description)}';
         groups.putIfAbsent(key, () => []).add(event);
       }
+      // An untracked CalSync event identical to a tracked one is a leftover
+      // from a sync that was cut off between creating it and recording it.
+      final removed = <String>{};
+      for (final group in groups.values) {
+        if (group.length < 2) continue;
+        final tracked = group.where((e) => !untracked.contains(e)).toList();
+        if (tracked.isEmpty) continue;
+        for (final leftover in group.where(untracked.contains)) {
+          final result = await _calendarService.deleteEvent(leftover.eventId);
+          if (result.success) {
+            removed.add(leftover.eventId);
+            await _log(profileId,
+                'REMOVE untracked duplicate tgt=${leftover.eventId} '
+                '"${leftover.title}" ${_stamp(leftover.startDate)} '
+                '(copy of tgt=${tracked.first.eventId})');
+          }
+        }
+      }
+      untracked.removeWhere((e) => removed.contains(e.eventId));
+      for (final group in groups.values) {
+        group.removeWhere((e) => removed.contains(e.eventId));
+      }
+      groups.removeWhere((_, g) => g.isEmpty);
       final duplicates = groups.values.where((g) => g.length > 1).toList();
 
       if (untracked.isEmpty && duplicates.isEmpty) {
@@ -389,9 +431,36 @@ class SyncEngine {
     required List<Map<String, Object?>> mappings,
     required List<Event> sourceEvents,
     required List<Map<String, Object?>> toDelete,
+    required List<ToRelinkEntry> toRelink,
+    required Map<String, Event> unmappedByKey,
     required List<String> errors,
     required DateTime listedAt,
+    required String syncEventName,
+    required bool copyDescription,
+    required bool omitSourceTitle,
   }) async {
+    // An identical, not yet synced event under a new ID: the calendar
+    // replaced the event, so keep the existing target and relink to it.
+    Event? takeReplacement(Map<String, Object?> mapping, Event? oldEvent) {
+      final stored = mapping['source_signature'] as String?;
+      for (final entry in unmappedByKey.entries) {
+        final sameSignature = stored != null &&
+            stored ==
+                sourceSignature(
+                  entry.value,
+                  syncEventName: syncEventName,
+                  copyDescription: copyDescription,
+                  omitSourceTitle: omitSourceTitle,
+                );
+        final sameContent =
+            oldEvent != null && _contentKey(oldEvent) == entry.key;
+        if (sameSignature || sameContent) {
+          return unmappedByKey.remove(entry.key);
+        }
+      }
+      return null;
+    }
+
     for (final mapping in mappings) {
       final sourceEventId = mapping['source_event_id'] as String;
 
@@ -427,6 +496,12 @@ class SyncEngine {
           );
 
           if (sourceEvent == null) {
+            final replacement = takeReplacement(mapping, null);
+            if (replacement != null) {
+              toRelink.add(
+                  ToRelinkEntry(mapping: mapping, sourceEvent: replacement));
+              continue;
+            }
             toDelete.add(
                 {...mapping, 'delete_reason': 'source event no longer exists'});
             continue;
@@ -434,6 +509,12 @@ class SyncEngine {
           final staleReason =
               await _staleSourceReason(sourceEvent, sourceEventId, listedAt);
           if (staleReason != null) {
+            final replacement = takeReplacement(mapping, sourceEvent);
+            if (replacement != null) {
+              toRelink.add(
+                  ToRelinkEntry(mapping: mapping, sourceEvent: replacement));
+              continue;
+            }
             toDelete.add({...mapping, 'delete_reason': staleReason});
           } else {
             sourceEvents.add(sourceEvent);
@@ -521,7 +602,41 @@ class SyncEngine {
     );
 
     final sourceEventIds = sourceEvents.map((e) => e.eventId).toSet();
+    final mappedIds =
+        mappings.map((m) => m['source_event_id'] as String).toSet();
 
+    // Instances of a series share the event ID; keep one per ID.
+    final listedById = <String, Event>{};
+    for (final event in sourceEvents) {
+      listedById.putIfAbsent(event.eventId, () => event);
+    }
+    final unmappedByKey = <String, Event>{};
+    for (final event in listedById.values) {
+      if (!mappedIds.contains(event.eventId)) {
+        unmappedByKey.putIfAbsent(_contentKey(event), () => event);
+      }
+    }
+
+    // Synced events that are still listed, by content. A second synced
+    // event with the same content is a calendar-made copy of the first: its
+    // target is removed.
+    final mappedListedByKey = <String, String>{};
+    final mergedIds = <String>{};
+    for (final mapping in mappings) {
+      final id = mapping['source_event_id'] as String;
+      final event = listedById[id];
+      if (event == null) continue;
+      final key = _contentKey(event);
+      final kept = mappedListedByKey[key];
+      if (kept == null) {
+        mappedListedByKey[key] = id;
+      } else {
+        mergedIds.add(id);
+        toDelete.add({...mapping, 'delete_reason': 'same event as src=$kept'});
+      }
+    }
+
+    final toRelink = <ToRelinkEntry>[];
     await _processOrphanMappings(
       profileId: profileId,
       sourceEventIds: sourceEventIds,
@@ -530,13 +645,37 @@ class SyncEngine {
       mappings: mappings,
       sourceEvents: sourceEvents,
       toDelete: toDelete,
+      toRelink: toRelink,
+      unmappedByKey: unmappedByKey,
       errors: errors,
       listedAt: listedAt,
+      syncEventName: syncEventName,
+      copyDescription: copyDescription,
+      omitSourceTitle: omitSourceTitle,
     );
+    final relinkedIds = toRelink.map((r) => r.sourceEvent.eventId).toSet();
 
     for (final event in sourceEvents) {
       final eventId = event.eventId;
       final isInstance = eventId != event.instanceId;
+
+      if (relinkedIds.contains(eventId) || mergedIds.contains(eventId)) {
+        processedIds.add(eventId);
+        toSkip.add(event);
+        continue;
+      }
+      if (!mappedIds.contains(eventId) && !processedIds.contains(eventId)) {
+        final twin = mappedListedByKey[_contentKey(event)];
+        if (twin != null) {
+          // The calendar created a copy of an event that is already synced
+          // and kept the original; don't sync the copy.
+          await _log(profileId,
+              'SKIP ${_describe(event)}: same event as src=$twin');
+          processedIds.add(eventId);
+          toSkip.add(event);
+          continue;
+        }
+      }
 
       if (isInstance) {
         if (processedIds.contains(eventId)) {
@@ -603,6 +742,7 @@ class SyncEngine {
       toUpdate: toUpdate,
       toSkip: toSkip,
       toDelete: toDelete,
+      toRelink: toRelink,
       errors: errors,
     );
   }
@@ -763,6 +903,22 @@ class SyncEngine {
     final deleted = <String>[];
     final updated = <String>[];
     final errors = <String>[];
+
+    for (final entry in plan.toRelink) {
+      final oldId = entry.mapping['source_event_id'] as String;
+      final event = entry.sourceEvent;
+      try {
+        await _mappingDb.relinkMapping(entry.mapping['id'] as int, event.eventId);
+        await _log(
+          profileId,
+          'RELINK ${_describe(event)} replaces src=$oldId, '
+          'keeping tgt=${entry.mapping['target_event_id']}',
+        );
+        updated.add(event.eventId);
+      } catch (e) {
+        errors.add('${event.eventId}: relink failed: $e');
+      }
+    }
 
     for (final entry in plan.toDelete) {
       final mappingId = entry['id'] as int;

@@ -75,6 +75,17 @@ class MappingDatabase {
     );
   }
 
+  /// Points an existing mapping at a new source event ID.
+  Future<void> relinkMapping(int id, String sourceEventId) async {
+    final db = await database;
+    await db.update(
+      _tableName,
+      {_columnSourceEventId: sourceEventId},
+      where: '$_columnId = ?',
+      whereArgs: [id],
+    );
+  }
+
   /// Remembers the [sourceSignature] the target was last written from.
   Future<void> recordSourceSignature(
     String profileId,

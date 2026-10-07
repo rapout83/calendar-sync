@@ -73,6 +73,7 @@ void main() {
         .thenAnswer((_) async {});
     when(() => mappingDb.recordSourceSignature(any(), any(), any(), any()))
         .thenAnswer((_) async {});
+    when(() => mappingDb.relinkMapping(any(), any())).thenAnswer((_) async {});
     when(() => calendarService.updateEvent(
           any(),
           title: any(named: 'title'),
@@ -99,7 +100,7 @@ void main() {
           isRecurring: false,
         );
 
-    test('logs untracked and duplicated CalSync events in the target',
+    test('removes untracked copies of tracked events, reports the rest',
         () async {
       final t1 = now.add(const Duration(days: 1));
       final t2 = now.add(const Duration(days: 2));
@@ -112,10 +113,17 @@ void main() {
           copy('t-1', t1, 'Standup'),
           copy('t-2', t1, 'Standup'),
           copy('t-3', t2, 'Review'),
+          copy('t-4', t2, 'Planning'),
+          copy('t-5', t2, 'Planning'),
         ],
       );
+      // t-2 is an untracked copy of tracked t-1 and gets removed. t-4 and
+      // t-5 are untracked copies with no tracked twin: kept and reported.
       when(() => mappingDb.isEventCreatedBySync(targetCalId, any()))
-          .thenAnswer((inv) async => inv.positionalArguments[1] != 't-2');
+          .thenAnswer((inv) async =>
+              !['t-2', 't-4', 't-5'].contains(inv.positionalArguments[1]));
+      when(() => calendarService.deleteEvent('t-2'))
+          .thenAnswer((_) async => const CalendarDeleteResult(success: true));
 
       await engine.runSync(
         profileId: profileId,
@@ -127,10 +135,12 @@ void main() {
       final lines = verify(() => mappingDb.appendSyncLog(profileId, captureAny()))
           .captured
           .cast<String>();
+      expect(lines, contains(startsWith('REMOVE untracked duplicate tgt=t-2')));
       expect(lines, contains(startsWith(
-          'CHECK target: 1 untracked CalSync events, 1 duplicated events')));
-      expect(lines, contains(contains('untracked tgt=t-2')));
-      expect(lines, contains(contains('duplicate x2 "Standup"')));
+          'CHECK target: 2 untracked CalSync events, 1 duplicated events')));
+      expect(lines, contains(contains('duplicate x2 "Planning"')));
+      verifyNever(() => calendarService.deleteEvent('t-4'));
+      verifyNever(() => calendarService.deleteEvent('t-5'));
     });
 
     test('clean target logs no duplicates', () async {
@@ -665,7 +675,7 @@ void main() {
           .thenAnswer((_) async => false);
     }
 
-    test('old ID flagged deleted but still fetchable -> delete + create',
+    test('old ID flagged deleted, identical new ID -> relinked, nothing created',
         () async {
       when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
         (_) async => [
@@ -688,15 +698,144 @@ void main() {
         syncEventName: syncName,
       );
 
-      expect(plan.toDelete, hasLength(1));
-      expect(plan.toDelete.first['source_event_id'], 'src-old');
-      expect(plan.toCreate, hasLength(1));
-      expect(plan.toCreate.first.sourceEvent.eventId, 'src-new');
+      expect(plan.toDelete, isEmpty);
+      expect(plan.toCreate, isEmpty);
       expect(plan.toUpdate, isEmpty);
-      expect(plan.toSkip.any((e) => e.eventId == 'src-old'), isFalse);
+      expect(plan.toRelink, hasLength(1));
+      expect(plan.toRelink.first.mapping['source_event_id'], 'src-old');
+      expect(plan.toRelink.first.sourceEvent.eventId, 'src-new');
     });
 
-    test('old ID not flagged but missing from listing inside window -> deleted',
+    test('old ID gone, different new event -> old deleted, new created',
+        () async {
+      final otherStart = inWindowStart.add(const Duration(hours: 3));
+      when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
+        (_) async => [
+          _makeEvent('src-new',
+              start: otherStart, end: otherStart.add(const Duration(hours: 1))),
+        ],
+      );
+      stubOldMapping();
+      stubNewSourceUnsynced();
+      when(() => calendarService.getEvent('src-old')).thenAnswer(
+        (_) async =>
+            _makeEvent('src-old', start: inWindowStart, end: inWindowEnd),
+      );
+      when(() => calendarService.isEventDeleted('src-old'))
+          .thenAnswer((_) async => true);
+
+      final plan = await engine.runDryRun(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(plan.toRelink, isEmpty);
+      expect(plan.toDelete.single['source_event_id'], 'src-old');
+      expect(plan.toCreate.single.sourceEvent.eventId, 'src-new');
+    });
+
+    test('new ID while identical old ID still listed -> new one not synced',
+        () async {
+      when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
+        (_) async => [
+          _makeEvent('src-old', start: inWindowStart, end: inWindowEnd),
+          _makeEvent('src-new', start: inWindowStart, end: inWindowEnd),
+        ],
+      );
+      stubOldMapping();
+      stubNewSourceUnsynced();
+      when(() => mappingDb.isEventCreatedBySync(sourceCalId, 'src-old'))
+          .thenAnswer((_) async => false);
+      when(() => mappingDb.isEventSynced(profileId, sourceCalId, 'src-old'))
+          .thenAnswer((_) async => true);
+
+      final plan = await engine.runDryRun(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(plan.toCreate, isEmpty);
+      expect(plan.toDelete, isEmpty);
+      expect(plan.toSkip.map((e) => e.eventId), contains('src-new'));
+    });
+
+    test('two synced copies of the same event -> extra copy removed',
+        () async {
+      when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
+        (_) async => [
+          _makeEvent('src-old', start: inWindowStart, end: inWindowEnd),
+          _makeEvent('src-new', start: inWindowStart, end: inWindowEnd),
+        ],
+      );
+      when(() => mappingDb.listMappingsForCalendar(profileId, sourceCalId))
+          .thenAnswer(
+        (_) async => [
+          {
+            'id': 1,
+            'source_event_id': 'src-old',
+            'target_event_id': 'tgt-old',
+            'target_calendar_id': targetCalId,
+          },
+          {
+            'id': 2,
+            'source_event_id': 'src-new',
+            'target_event_id': 'tgt-new',
+            'target_calendar_id': targetCalId,
+          },
+        ],
+      );
+      when(() => mappingDb.isEventCreatedBySync(sourceCalId, 'src-old'))
+          .thenAnswer((_) async => false);
+      when(() => mappingDb.isEventSynced(profileId, sourceCalId, 'src-old'))
+          .thenAnswer((_) async => true);
+      when(() => calendarService.getEvent('tgt-old'))
+          .thenAnswer((_) async => targetEvent('tgt-old'));
+
+      final plan = await engine.runDryRun(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(plan.toDelete.single['source_event_id'], 'src-new');
+      expect(plan.toDelete.single['target_event_id'], 'tgt-new');
+      expect(plan.toCreate, isEmpty);
+    });
+
+    test('relink is applied on sync and keeps the target', () async {
+      when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
+        (_) async => [
+          _makeEvent('src-new', start: inWindowStart, end: inWindowEnd),
+        ],
+      );
+      stubOldMapping();
+      stubNewSourceUnsynced();
+      when(() => calendarService.getEvent('src-old')).thenAnswer(
+        (_) async =>
+            _makeEvent('src-old', start: inWindowStart, end: inWindowEnd),
+      );
+      when(() => calendarService.isEventDeleted('src-old'))
+          .thenAnswer((_) async => true);
+
+      final result = await engine.runSync(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(result.errors, isEmpty);
+      expect(result.updated, ['src-new']);
+      verify(() => mappingDb.relinkMapping(1, 'src-new')).called(1);
+      verifyNever(() => calendarService.deleteEvent('tgt-old'));
+    });
+
+    test('old ID missing from listing, identical new ID -> relinked',
         () async {
       when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
         (_) async => [
@@ -717,9 +856,9 @@ void main() {
         syncEventName: syncName,
       );
 
-      expect(plan.toDelete, hasLength(1));
-      expect(plan.toDelete.first['source_event_id'], 'src-old');
-      expect(plan.toCreate, hasLength(1));
+      expect(plan.toDelete, isEmpty);
+      expect(plan.toCreate, isEmpty);
+      expect(plan.toRelink.single.sourceEvent.eventId, 'src-new');
     });
 
     test('existing pile of duplicates is cleaned up in one run', () async {
