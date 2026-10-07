@@ -83,6 +83,78 @@ void main() {
         )).thenAnswer((_) async => false);
   });
 
+  group('Target check', () {
+    Event copy(String id, DateTime start, String sourceTitle) => Event(
+          eventId: id,
+          instanceId: id,
+          calendarId: targetCalId,
+          title: syncName,
+          description: '$sourceTitle\n---\n🔃 Automatically created by CalSync',
+          startDate: start,
+          endDate: start.add(const Duration(hours: 1)),
+          isAllDay: false,
+          availability: EventAvailability.busy,
+          status: EventStatus.none,
+          isRecurring: false,
+        );
+
+    test('logs untracked and duplicated CalSync events in the target',
+        () async {
+      final t1 = now.add(const Duration(days: 1));
+      final t2 = now.add(const Duration(days: 2));
+      when(() => calendarService.listEvents(sourceCalId))
+          .thenAnswer((_) async => []);
+      when(() => mappingDb.listMappingsForCalendar(profileId, sourceCalId))
+          .thenAnswer((_) async => []);
+      when(() => calendarService.listEvents(targetCalId)).thenAnswer(
+        (_) async => [
+          copy('t-1', t1, 'Standup'),
+          copy('t-2', t1, 'Standup'),
+          copy('t-3', t2, 'Review'),
+        ],
+      );
+      when(() => mappingDb.isEventCreatedBySync(targetCalId, any()))
+          .thenAnswer((inv) async => inv.positionalArguments[1] != 't-2');
+
+      await engine.runSync(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      final lines = verify(() => mappingDb.appendSyncLog(profileId, captureAny()))
+          .captured
+          .cast<String>();
+      expect(lines, contains(startsWith(
+          'CHECK target: 1 untracked CalSync events, 1 duplicated events')));
+      expect(lines, contains(contains('untracked tgt=t-2')));
+      expect(lines, contains(contains('duplicate x2 "Standup"')));
+    });
+
+    test('clean target logs no duplicates', () async {
+      when(() => calendarService.listEvents(sourceCalId))
+          .thenAnswer((_) async => []);
+      when(() => mappingDb.listMappingsForCalendar(profileId, sourceCalId))
+          .thenAnswer((_) async => []);
+      when(() => calendarService.listEvents(targetCalId)).thenAnswer(
+        (_) async => [copy('t-1', now.add(const Duration(days: 1)), 'Standup')],
+      );
+      when(() => mappingDb.isEventCreatedBySync(targetCalId, 't-1'))
+          .thenAnswer((_) async => true);
+
+      await engine.runSync(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      verify(() => mappingDb.appendSyncLog(
+          profileId, 'CHECK target: 1 CalSync events, no duplicates')).called(1);
+    });
+  });
+
   group('Source signature', () {
     final start = now.add(const Duration(days: 2));
     final end = start.add(const Duration(hours: 1));

@@ -172,6 +172,7 @@ class SyncEngine {
         '${result.updated.length} updated, ${result.deleted.length} deleted, '
         '${result.skipped.length} skipped, ${result.errors.length} errors',
       );
+      await _checkTarget(profileId, targetCalendarId);
       return result;
     } finally {
       try {
@@ -208,6 +209,72 @@ class SyncEngine {
     } catch (_) {
       // Logging must never break a sync.
     }
+  }
+
+  /// Logs what is actually in the target calendar after a run, so the log
+  /// shows duplicates directly instead of leaving them to be inferred:
+  /// CalSync copies the app no longer tracks, and copies that look alike
+  /// (same title, times and source title line).
+  Future<void> _checkTarget(String profileId, String targetCalendarId) async {
+    try {
+      final listed = await _calendarService.listEvents(targetCalendarId);
+      if (listed == null) {
+        await _log(profileId, 'CHECK target: could not list target calendar');
+        return;
+      }
+
+      final seen = <String>{};
+      final untracked = <Event>[];
+      final groups = <String, List<Event>>{};
+      for (final event in listed) {
+        // Recurring events are listed once per instance.
+        if (!seen.add(event.eventId)) continue;
+        final tracked = await _mappingDb.isEventCreatedBySync(
+          targetCalendarId,
+          event.eventId,
+        );
+        final marked = event.description?.contains(_syncMarker) ?? false;
+        if (!tracked && !marked) continue; // Not a CalSync event.
+        if (!tracked) untracked.add(event);
+        final key = '${event.title}|${event.startDate.millisecondsSinceEpoch}|'
+            '${event.endDate.millisecondsSinceEpoch}|'
+            '${_sourceTitleLine(event.description)}';
+        groups.putIfAbsent(key, () => []).add(event);
+      }
+      final duplicates = groups.values.where((g) => g.length > 1).toList();
+
+      if (untracked.isEmpty && duplicates.isEmpty) {
+        await _log(profileId,
+            'CHECK target: ${groups.length} CalSync events, no duplicates');
+        return;
+      }
+      await _log(
+        profileId,
+        'CHECK target: ${untracked.length} untracked CalSync events, '
+        '${duplicates.length} duplicated events',
+      );
+      for (final event in untracked.take(10)) {
+        await _log(profileId,
+            '  untracked tgt=${event.eventId} "${event.title}" ${_stamp(event.startDate)}');
+      }
+      for (final group in duplicates.take(10)) {
+        final ids = group.map((e) => e.eventId).join(', ');
+        await _log(profileId,
+            '  duplicate x${group.length} "${_sourceTitleLine(group.first.description) ?? group.first.title}" '
+            '${_stamp(group.first.startDate)}: tgt=$ids');
+      }
+    } catch (e) {
+      await _log(profileId, 'CHECK target failed: $e');
+    }
+  }
+
+  /// The source title line CalSync writes above the `---` marker line.
+  static String? _sourceTitleLine(String? description) {
+    if (description == null) return null;
+    final index = description.lastIndexOf('\n---\n');
+    if (index < 0) return null;
+    final before = description.substring(0, index);
+    return before.substring(before.lastIndexOf('\n') + 1);
   }
 
   Future<void> _recordSignature(
