@@ -81,13 +81,16 @@ void callbackDispatcher() {
             result.updated.length,
             result.errors.length,
           );
-        } catch (_) {
+        } catch (e) {
+          await _logError(profile.id, 'sync crashed: $e');
           await _logStatus(profile.id, 0, 0, 0, 0, 1);
         }
       }
 
       await _signalDone();
-    } catch (_) {}
+    } catch (e) {
+      await _logError('', 'background task failed: $e');
+    }
 
     return true;
   });
@@ -104,6 +107,12 @@ Future<void> _logStatus(String profileId, int synced, int deleted, int skipped, 
     updated: updated,
     errors: errors,
   );
+}
+
+Future<void> _logError(String profileId, String message) async {
+  try {
+    await MappingDatabase().appendSyncLog(profileId, 'ERROR $message');
+  } catch (_) {}
 }
 
 Future<void> _signalDone() async {

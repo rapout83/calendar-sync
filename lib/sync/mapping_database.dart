@@ -228,11 +228,12 @@ class MappingDatabase {
   ///
   /// Background jobs and the UI run syncs in separate isolates with their
   /// own database connections, so the lock lives in the shared database.
-  /// A lock older than [staleAfter] is assumed to belong to a sync that was
-  /// killed and is taken over.
+  /// The holder refreshes the lock while it runs ([refreshSyncLock]); a lock
+  /// not refreshed for [staleAfter] belongs to a sync that was killed or
+  /// hung, and is taken over.
   Future<bool> tryAcquireSyncLock(
     String owner, {
-    Duration staleAfter = const Duration(minutes: 10),
+    Duration staleAfter = const Duration(minutes: 2),
   }) async {
     final db = await database;
     final now = DateTime.now().toUtc();
@@ -248,6 +249,19 @@ class MappingDatabase {
     }
 
     return db.transaction((txn) async {
+      final stale = await txn.query(
+        _lockTable,
+        where: 'acquired_at < ?',
+        whereArgs: [staleBefore],
+      );
+      if (stale.isNotEmpty) {
+        await txn.insert(_logTable, {
+          'timestamp': DateTime.now().toIso8601String(),
+          'profile_id': '',
+          'message': 'TAKEOVER: previous sync did not finish '
+              '(last alive ${stale.first['acquired_at']} UTC)',
+        });
+      }
       await txn.delete(
         _lockTable,
         where: 'acquired_at < ?',
@@ -261,6 +275,17 @@ class MappingDatabase {
       final rows = await txn.query(_lockTable, columns: ['owner']);
       return rows.isNotEmpty && rows.first['owner'] == owner;
     });
+  }
+
+  /// Marks the lock held by [owner] as still in use.
+  Future<void> refreshSyncLock(String owner) async {
+    final db = await database;
+    await db.update(
+      _lockTable,
+      {'acquired_at': DateTime.now().toUtc().toIso8601String()},
+      where: 'owner = ?',
+      whereArgs: [owner],
+    );
   }
 
   Future<void> releaseSyncLock(String owner) async {

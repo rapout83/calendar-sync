@@ -41,6 +41,33 @@ void main() {
       });
 
       expect(await mappingDb.tryAcquireSyncLock('b'), isTrue);
+      final log = await mappingDb.getSyncLog();
+      expect(log.first['message'], startsWith('TAKEOVER'));
+    });
+
+    test('refreshed lock is not taken over', () async {
+      expect(await mappingDb.tryAcquireSyncLock('a'), isTrue);
+      await db.update('sync_lock', {
+        'acquired_at': DateTime.now()
+            .toUtc()
+            .subtract(const Duration(minutes: 3))
+            .toIso8601String(),
+      });
+      await mappingDb.refreshSyncLock('a');
+
+      expect(await mappingDb.tryAcquireSyncLock('b'), isFalse);
+    });
+
+    test('lock without refresh for 2 minutes is taken over', () async {
+      expect(await mappingDb.tryAcquireSyncLock('a'), isTrue);
+      await db.update('sync_lock', {
+        'acquired_at': DateTime.now()
+            .toUtc()
+            .subtract(const Duration(minutes: 3))
+            .toIso8601String(),
+      });
+
+      expect(await mappingDb.tryAcquireSyncLock('b'), isTrue);
     });
   });
 

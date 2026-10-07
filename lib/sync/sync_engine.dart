@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
 import 'dart:math';
@@ -152,6 +153,11 @@ class SyncEngine {
         errors: UnmodifiableListView(['another sync is still running']),
       );
     }
+    // Keep the lock fresh while this run is alive. If the run is killed or
+    // hangs, the refreshes stop and the next sync takes over within minutes.
+    final heartbeat = Timer.periodic(const Duration(seconds: 30), (_) {
+      _mappingDb.refreshSyncLock(owner).catchError((_) {});
+    });
     try {
       await _log(profileId, 'START run ($trigger)');
       final result = await _runSyncLocked(
@@ -175,6 +181,7 @@ class SyncEngine {
       await _checkTarget(profileId, targetCalendarId);
       return result;
     } finally {
+      heartbeat.cancel();
       try {
         await _mappingDb.releaseSyncLock(owner);
       } catch (_) {}

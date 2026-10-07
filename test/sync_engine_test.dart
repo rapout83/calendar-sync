@@ -68,6 +68,7 @@ void main() {
     when(() => mappingDb.tryAcquireSyncLock(any()))
         .thenAnswer((_) async => true);
     when(() => mappingDb.releaseSyncLock(any())).thenAnswer((_) async {});
+    when(() => mappingDb.refreshSyncLock(any())).thenAnswer((_) async {});
     when(() => mappingDb.appendSyncLog(any(), any()))
         .thenAnswer((_) async {});
     when(() => mappingDb.recordSourceSignature(any(), any(), any(), any()))
