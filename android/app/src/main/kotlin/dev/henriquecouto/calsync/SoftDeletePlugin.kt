@@ -1,6 +1,7 @@
 package dev.henriquecouto.calsync
 
 import android.content.ContentResolver
+import android.content.ContentValues
 import android.provider.CalendarContract
 import androidx.annotation.NonNull
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -43,6 +44,42 @@ class SoftDeletePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     result.success(deletedRows > 0)
                 } catch (e: Exception) {
                     result.error("DELETE_ERROR", e.message, null)
+                }
+            }
+            "updateEvent" -> {
+                val eventId = call.argument<String>("eventId")?.toLongOrNull()
+                val title = call.argument<String>("title")
+                val start = call.argument<Number>("start")?.toLong()
+                val end = call.argument<Number>("end")?.toLong()
+                if (eventId == null || title == null || start == null || end == null) {
+                    result.error("INVALID_ARG", "eventId, title, start and end are required", null)
+                    return
+                }
+                val ctx = appContext ?: run {
+                    result.error("NO_CONTEXT", "Plugin not attached", null)
+                    return
+                }
+                try {
+                    // Only for one-off timed events; all-day and recurring
+                    // events are replaced from Dart instead.
+                    val values = ContentValues().apply {
+                        put(CalendarContract.Events.TITLE, title)
+                        put(CalendarContract.Events.DTSTART, start)
+                        put(CalendarContract.Events.DTEND, end)
+                        put(CalendarContract.Events.DESCRIPTION, call.argument<String>("description"))
+                        if (call.argument<Boolean>("setLocation") == true) {
+                            put(CalendarContract.Events.EVENT_LOCATION, call.argument<String>("location"))
+                        }
+                    }
+                    val rows = ctx.contentResolver.update(
+                        CalendarContract.Events.CONTENT_URI,
+                        values,
+                        "${CalendarContract.Events._ID} = ? AND ${CalendarContract.Events.DELETED} = 0",
+                        arrayOf(eventId.toString())
+                    )
+                    result.success(rows > 0)
+                } catch (e: Exception) {
+                    result.error("UPDATE_ERROR", e.message, null)
                 }
             }
             "isEventDeleted" -> {

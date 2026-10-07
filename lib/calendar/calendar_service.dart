@@ -67,6 +67,33 @@ class CalendarService {
     }
   }
 
+  /// Updates a timed event in place. Returns false if it could not be
+  /// updated, so callers can fall back to replacing it.
+  Future<bool> updateEvent(
+    String eventId, {
+    required String title,
+    required DateTime start,
+    required DateTime end,
+    required String description,
+    String? location,
+    bool setLocation = false,
+  }) async {
+    try {
+      final ok = await _channel.invokeMethod<bool>('updateEvent', {
+        'eventId': eventId,
+        'title': title,
+        'start': start.millisecondsSinceEpoch,
+        'end': end.millisecondsSinceEpoch,
+        'description': description,
+        'setLocation': setLocation,
+        'location': location,
+      });
+      return ok == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Whether the event row is gone or flagged as deleted by its sync adapter.
   ///
   /// Returns false when the check itself fails, so callers fall back to

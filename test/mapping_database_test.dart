@@ -44,6 +44,25 @@ void main() {
     });
   });
 
+  group('Source signature', () {
+    test('recordSourceSignature is returned with the mapping', () async {
+      await db.delete('sync_mappings');
+      await mappingDb.insertMapping(
+        profileId: 'prof-1',
+        sourceCalendarId: 'src-cal',
+        sourceEventId: 'src-1',
+        targetCalendarId: 'tgt-cal',
+        targetEventId: 'tgt-1',
+        syncedAt: '2026-10-07T10:00:00',
+      );
+
+      await mappingDb.recordSourceSignature('prof-1', 'src-cal', 'src-1', 'abc');
+
+      final rows = await mappingDb.listMappingsForCalendar('prof-1', 'src-cal');
+      expect(rows.single['source_signature'], 'abc');
+    });
+  });
+
   group('Sync log', () {
     test('entries are returned newest first and can be cleared', () async {
       await mappingDb.appendSyncLog('prof-1', 'first');

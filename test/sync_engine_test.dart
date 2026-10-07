@@ -55,6 +55,10 @@ void main() {
   final futureEnd = DateTime.utc(2027, 1, 1);
   final oldEnd = DateTime.utc(2020, 1, 1);
 
+  setUpAll(() {
+    registerFallbackValue(DateTime(2000));
+  });
+
   setUp(() {
     calendarService = MockCalendarService();
     mappingDb = MockMappingDatabase();
@@ -66,6 +70,160 @@ void main() {
     when(() => mappingDb.releaseSyncLock(any())).thenAnswer((_) async {});
     when(() => mappingDb.appendSyncLog(any(), any()))
         .thenAnswer((_) async {});
+    when(() => mappingDb.recordSourceSignature(any(), any(), any(), any()))
+        .thenAnswer((_) async {});
+    when(() => calendarService.updateEvent(
+          any(),
+          title: any(named: 'title'),
+          start: any(named: 'start'),
+          end: any(named: 'end'),
+          description: any(named: 'description'),
+          location: any(named: 'location'),
+          setLocation: any(named: 'setLocation'),
+        )).thenAnswer((_) async => false);
+  });
+
+  group('Source signature', () {
+    final start = now.add(const Duration(days: 2));
+    final end = start.add(const Duration(hours: 1));
+    String sig(Event e) => sourceSignature(
+          e,
+          syncEventName: syncName,
+          copyDescription: false,
+          omitSourceTitle: false,
+        );
+
+    void stubMapping(String? signature) {
+      when(() => mappingDb.listMappingsForCalendar(profileId, sourceCalId))
+          .thenAnswer((_) async => [
+                {
+                  'id': 1,
+                  'source_event_id': 'src-1',
+                  'target_event_id': 'tgt-1',
+                  'target_calendar_id': targetCalId,
+                  'source_signature': signature,
+                },
+              ]);
+      when(() => mappingDb.isEventCreatedBySync(sourceCalId, 'src-1'))
+          .thenAnswer((_) async => false);
+      when(() => mappingDb.isEventSynced(profileId, sourceCalId, 'src-1'))
+          .thenAnswer((_) async => true);
+      // Target as rewritten by the server: description no longer holds the
+      // title and times are off, which used to trigger an update every run.
+      when(() => calendarService.getEvent('tgt-1')).thenAnswer(
+        (_) async => Event(
+          eventId: 'tgt-1',
+          instanceId: 'tgt-1',
+          calendarId: targetCalId,
+          title: syncName,
+          description: '<html>rewritten</html>',
+          startDate: start.add(const Duration(minutes: 1)),
+          endDate: end,
+          isAllDay: false,
+          availability: EventAvailability.busy,
+          status: EventStatus.none,
+          isRecurring: false,
+        ),
+      );
+    }
+
+    test('unchanged source is skipped even if the target was rewritten',
+        () async {
+      final src = _makeEvent('src-1', start: start, end: end);
+      when(() => calendarService.listEvents(sourceCalId))
+          .thenAnswer((_) async => [src]);
+      stubMapping(sig(src));
+
+      final plan = await engine.runDryRun(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(plan.toUpdate, isEmpty);
+      expect(plan.toSkip.map((e) => e.eventId), contains('src-1'));
+    });
+
+    test('changed source is updated in place, nothing created or deleted',
+        () async {
+      final src = _makeEvent('src-1', start: start, end: end);
+      when(() => calendarService.listEvents(sourceCalId))
+          .thenAnswer((_) async => [src]);
+      stubMapping('stale-signature');
+      when(() => calendarService.updateEvent(
+            'tgt-1',
+            title: syncName,
+            start: start,
+            end: end,
+            description: any(named: 'description'),
+            location: any(named: 'location'),
+            setLocation: false,
+          )).thenAnswer((_) async => true);
+
+      final result = await engine.runSync(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      // createEvent/deleteEvent are not stubbed: calling them would error.
+      expect(result.errors, isEmpty);
+      expect(result.updated, ['src-1']);
+      verify(() => mappingDb.recordSourceSignature(
+            profileId, sourceCalId, 'src-1', sig(src))).called(1);
+    });
+
+    test('legacy mapping without signature gets one when unchanged', () async {
+      final src = _makeEvent('src-1', start: start, end: end);
+      when(() => calendarService.listEvents(sourceCalId))
+          .thenAnswer((_) async => [src]);
+      stubMapping(null);
+      when(() => calendarService.getEvent('tgt-1')).thenAnswer(
+        (_) async => Event(
+          eventId: 'tgt-1',
+          instanceId: 'tgt-1',
+          calendarId: targetCalId,
+          title: syncName,
+          description: 'Test Event\n---\n🔃 Automatically created by CalSync',
+          startDate: start,
+          endDate: end,
+          isAllDay: false,
+          availability: EventAvailability.busy,
+          status: EventStatus.none,
+          isRecurring: false,
+        ),
+      );
+
+      final plan = await engine.runDryRun(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      expect(plan.toUpdate, isEmpty);
+      verify(() => mappingDb.recordSourceSignature(
+            profileId, sourceCalId, 'src-1', sig(src))).called(1);
+    });
+
+    test('signature changes with title and time but not with instance date',
+        () {
+      final a = _makeEvent('src-1', start: start, end: end);
+      final retitled = Event(
+        eventId: 'src-1', instanceId: 'src-1', calendarId: sourceCalId,
+        title: 'Other', startDate: start, endDate: end, isAllDay: false,
+        availability: EventAvailability.busy, status: EventStatus.none,
+        isRecurring: false,
+      );
+      final moved = _makeEvent('src-1',
+          start: start.add(const Duration(hours: 1)),
+          end: end.add(const Duration(hours: 1)));
+      expect(sig(retitled), isNot(sig(a)));
+      expect(sig(moved), isNot(sig(a)));
+      expect(sig(a), sig(_makeEvent('src-1', start: start, end: end)));
+    });
   });
 
   group('Sync lock', () {

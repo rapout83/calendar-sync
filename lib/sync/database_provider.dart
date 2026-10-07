@@ -25,7 +25,7 @@ class DatabaseProvider {
     final path = join(dbPath, name);
     final db = await openDatabase(
       path,
-      version: 9,
+      version: 10,
       singleInstance: false,
       onConfigure: (db) async {
         await db.rawQuery('PRAGMA journal_mode=WAL');
@@ -44,6 +44,7 @@ class DatabaseProvider {
             target_event_id TEXT NOT NULL,
             synced_at TEXT NOT NULL,
             canonical_time TEXT,
+            source_signature TEXT,
             UNIQUE(profile_id, source_calendar_id, source_event_id)
           )
         ''');
@@ -151,6 +152,9 @@ class DatabaseProvider {
         }
         if (oldVersion < 9) {
           await _createV9Tables(db);
+        }
+        if (oldVersion < 10) {
+          await db.execute('ALTER TABLE sync_mappings ADD COLUMN source_signature TEXT');
         }
       },
     );

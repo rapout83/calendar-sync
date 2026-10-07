@@ -11,6 +11,7 @@ class MappingDatabase {
   static const _columnTargetEventId = 'target_event_id';
   static const _columnSyncedAt = 'synced_at';
   static const _columnCanonicalTime = 'canonical_time';
+  static const _columnSourceSignature = 'source_signature';
 
   static const _statusTable = 'sync_status';
   static const _statusId = 'id';
@@ -71,6 +72,23 @@ class MappingDatabase {
         if (canonicalTime != null) _columnCanonicalTime: canonicalTime,
       },
       conflictAlgorithm: ConflictAlgorithm.replace,
+    );
+  }
+
+  /// Remembers the [sourceSignature] the target was last written from.
+  Future<void> recordSourceSignature(
+    String profileId,
+    String sourceCalendarId,
+    String sourceEventId,
+    String signature,
+  ) async {
+    final db = await database;
+    await db.update(
+      _tableName,
+      {_columnSourceSignature: signature},
+      where:
+          '$_columnProfileId = ? AND $_columnSourceCalendarId = ? AND $_columnSourceEventId = ?',
+      whereArgs: [profileId, sourceCalendarId, sourceEventId],
     );
   }
 

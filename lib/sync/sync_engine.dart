@@ -1,4 +1,5 @@
 import 'dart:collection';
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:crypto/crypto.dart';
@@ -24,6 +25,37 @@ String buildDescription(
     description = '$sourceDescription\n\n$description';
   }
   return description;
+}
+
+/// Fingerprint of everything a synced copy is derived from.
+///
+/// Stored with the mapping so later syncs can tell whether the *source*
+/// changed. Comparing the source against the target instead is unreliable:
+/// sync adapters (e.g. Google) rewrite the target after upload, which made
+/// unchanged events look modified and get re-created on every run.
+String sourceSignature(
+  Event event, {
+  required String syncEventName,
+  required bool copyDescription,
+  required bool omitSourceTitle,
+}) {
+  final isRecurring = event.isRecurring && event.recurrenceRule != null;
+  final duration = event.endDate.difference(event.startDate).inMinutes;
+  // Instances of a series move forward in time, so a series is keyed on its
+  // time of day and length rather than on absolute dates.
+  final when = isRecurring
+      ? '${event.startDate.hour}:${event.startDate.minute}+$duration'
+      : '${event.startDate.millisecondsSinceEpoch}-${event.endDate.millisecondsSinceEpoch}';
+  final parts = [
+    event.title,
+    syncEventName,
+    '$omitSourceTitle',
+    '$copyDescription',
+    copyDescription ? (event.description ?? '') : '',
+    '${event.isAllDay}',
+    when,
+  ];
+  return sha256.convert(utf8.encode(parts.join('\u0000'))).toString();
 }
 
 class SyncPlan {
@@ -175,6 +207,25 @@ class SyncEngine {
       await _mappingDb.appendSyncLog(profileId, message);
     } catch (_) {
       // Logging must never break a sync.
+    }
+  }
+
+  Future<void> _recordSignature(
+    String profileId,
+    String sourceCalendarId,
+    String sourceEventId,
+    String signature,
+  ) async {
+    try {
+      await _mappingDb.recordSourceSignature(
+        profileId,
+        sourceCalendarId,
+        sourceEventId,
+        signature,
+      );
+    } catch (_) {
+      // Without a signature the next sync falls back to comparing against
+      // the target, which is the old behaviour.
     }
   }
 
@@ -540,6 +591,29 @@ class SyncEngine {
           return;
         }
 
+        final signature = sourceSignature(
+          event,
+          syncEventName: syncEventName,
+          copyDescription: copyDescription,
+          omitSourceTitle: omitSourceTitle,
+        );
+        final storedSignature = mapping['source_signature'] as String?;
+        if (storedSignature != null) {
+          if (storedSignature == signature) {
+            toSkip.add(event);
+            return;
+          }
+          toUpdate.add(ToUpdateEntry(
+            sourceEvent: event,
+            mapping: Map<String, Object?>.from(mapping),
+            projectedTitle: syncEventName.isEmpty ? event.title : syncEventName,
+            reason: 'source changed since last sync',
+          ));
+          return;
+        }
+
+        // Mappings from before signatures existed: fall back to comparing
+        // against the target once, then remember the signature.
         final isRecurring = event.isRecurring && event.recurrenceRule != null;
         final canonicalTime = mapping['canonical_time'] as String?;
         bool timeChanged;
@@ -561,6 +635,7 @@ class SyncEngine {
             !(targetEvent.description?.contains(titleFingerprint) ?? false);
 
         if (!timeChanged && !titleChanged) {
+          await _recordSignature(profileId, sourceCalendarId, eventId, signature);
           toSkip.add(event);
           return;
         }
@@ -705,6 +780,17 @@ class SyncEngine {
           targetCalendarId,
           targetEventId,
         );
+        await _recordSignature(
+          profileId,
+          sourceCalendarId,
+          eventId,
+          sourceSignature(
+            event,
+            syncEventName: syncEventName,
+            copyDescription: copyDescription,
+            omitSourceTitle: omitSourceTitle,
+          ),
+        );
 
         await _log(profileId, 'CREATE ${_describe(event)} -> tgt=$targetEventId');
         synced.add(eventId);
@@ -720,20 +806,57 @@ class SyncEngine {
       final targetEventId = mapping['target_event_id'] as String;
       final targetCalId = mapping['target_calendar_id'] as String;
 
+      final signature = sourceSignature(
+        event,
+        syncEventName: syncEventName,
+        copyDescription: copyDescription,
+        omitSourceTitle: omitSourceTitle,
+      );
+
       try {
         final hasRecurrence = event.isRecurring &&
             event.recurrenceRule != null;
+        final description = buildDescription(
+          event.title,
+          event.description,
+          copyDescription,
+          omitSourceTitle: omitSourceTitle,
+        );
+
+        // Edit one-off timed events in place. Replacing them (create + delete)
+        // depends on the delete reaching the server; when it doesn't, every
+        // update leaves another copy behind. All-day and recurring events
+        // still use replacement because their date/rule encoding is owned by
+        // the calendar plugin.
+        if (!hasRecurrence && !event.isAllDay) {
+          final updatedInPlace = await _calendarService.updateEvent(
+            targetEventId,
+            title: entry.projectedTitle,
+            start: event.startDate,
+            end: event.endDate,
+            description: description,
+            location: event.location,
+            setLocation: copyLocation,
+          );
+          if (updatedInPlace) {
+            await _recordSignature(
+                profileId, sourceCalendarId, eventId, signature);
+            await _log(
+              profileId,
+              'UPDATE ${_describe(event)} tgt=$targetEventId in place '
+              '(${entry.reason})',
+            );
+            updated.add(eventId);
+            continue;
+          }
+        }
+
         final newTargetEventId = await _calendarService.createEvent(
           targetCalId,
           entry.projectedTitle,
           event.startDate,
           event.endDate,
-          description: buildDescription(
-            event.title,
-            event.description,
-            copyDescription,
-            omitSourceTitle: omitSourceTitle,
-          ),
+          description: description,
           isAllDay: event.isAllDay,
               recurrenceRule:
                   hasRecurrence ? event.recurrenceRule : null,
@@ -766,6 +889,7 @@ class SyncEngine {
           rethrow;
         }
 
+        await _recordSignature(profileId, sourceCalendarId, eventId, signature);
         await _log(
           profileId,
           'UPDATE ${_describe(event)} tgt=$targetEventId -> $newTargetEventId '
