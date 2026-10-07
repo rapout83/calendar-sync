@@ -5,7 +5,6 @@ import '../calendar/calendar_service.dart';
 import '../sync/mapping_database.dart';
 import '../sync/sync_engine.dart';
 import '../sync/sync_status_screen.dart';
-import '../sync/sync_log_screen.dart';
 import '../sync/dry_run_screen.dart';
 import '../background/sync_scheduler.dart';
 import '../widgets/empty_state.dart';
@@ -214,16 +213,6 @@ class _DashboardScreenState extends State<DashboardScreen>
         title: const Text('CalSync'),
         centerTitle: true,
         actions: [
-          IconButton(
-            icon: const Icon(Icons.notes),
-            tooltip: 'Detailed log',
-            onPressed: () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(builder: (_) => const SyncLogScreen()),
-              );
-            },
-          ),
           if (_subscriptionsEnabled)
             IconButton(
               icon: const Icon(Icons.workspace_premium_outlined),
