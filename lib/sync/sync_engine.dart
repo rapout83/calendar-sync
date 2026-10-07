@@ -197,6 +197,11 @@ class SyncEngine {
         '${result.updated.length} updated, ${result.deleted.length} deleted, '
         '${result.skipped.length} skipped, ${result.errors.length} errors',
       );
+      await _excludeRemovedOccurrences(
+        profileId,
+        sourceCalendarId,
+        targetCalendarId,
+      );
       await _checkTarget(profileId, targetCalendarId);
       return result;
     } finally {
@@ -241,6 +246,105 @@ class SyncEngine {
   /// shows duplicates directly instead of leaving them to be inferred:
   /// CalSync copies the app no longer tracks, and copies that look alike
   /// (same title, times and source title line).
+  /// Removes occurrences from synced recurring series that no longer exist
+  /// in the source series.
+  ///
+  /// A recurring source is copied once with its recurrence rule, so the
+  /// target series generates its own occurrences. Cancelling (or moving) a
+  /// single occurrence in the source doesn't change the series itself, only
+  /// which instances the calendar lists. Compare the instances of each
+  /// synced series in the sync window by local date, and exclude target
+  /// occurrences on dates the source no longer has.
+  Future<void> _excludeRemovedOccurrences(
+    String profileId,
+    String sourceCalendarId,
+    String targetCalendarId,
+  ) async {
+    try {
+      final sourceListing = _lastSourceListing;
+      if (sourceListing == null) return;
+      final targetListing = await _calendarService.listEvents(targetCalendarId);
+      if (targetListing == null) return;
+      final mappings = await _mappingDb.listMappingsForCalendar(
+        profileId,
+        sourceCalendarId,
+      );
+
+      String day(DateTime time) {
+        final local = time.toLocal();
+        return '${local.year}-${local.month}-${local.day}';
+      }
+
+      // Stay clear of the window edges, where the two listings (taken a
+      // moment apart) may not line up.
+      final now = DateTime.now();
+      final from = now.add(const Duration(hours: 1));
+      final until =
+          now.add(CalendarService.syncWindow).subtract(const Duration(days: 1));
+
+      final sourceDays = <String, Set<String>>{};
+      for (final event in sourceListing) {
+        if (event.eventId == event.instanceId && !event.isRecurring) continue;
+        sourceDays.putIfAbsent(event.eventId, () => {}).add(day(event.startDate));
+      }
+      final targetInstances = <String, List<Event>>{};
+      for (final event in targetListing) {
+        if (event.eventId == event.instanceId && !event.isRecurring) continue;
+        targetInstances.putIfAbsent(event.eventId, () => []).add(event);
+      }
+
+      for (final mapping in mappings) {
+        final sourceId = mapping['source_event_id'] as String;
+        final targetId = mapping['target_event_id'] as String;
+        final instances = targetInstances[targetId];
+        final days = sourceDays[sourceId];
+        // No source instances in the window: the series ended or moved
+        // out; that is handled as a change to the series itself.
+        if (instances == null || days == null || days.isEmpty) continue;
+
+        final inRange = instances
+            .where((e) =>
+                e.startDate.isAfter(from) && e.startDate.isBefore(until))
+            .toList();
+        final missing =
+            inRange.where((e) => !days.contains(day(e.startDate))).toList();
+        if (missing.isEmpty) continue;
+        if (missing.any((e) => e.isAllDay)) {
+          await _log(profileId,
+              'WARN src=$sourceId: all-day series has removed occurrences; '
+              'not excluded');
+          continue;
+        }
+        if (missing.length * 2 > inRange.length) {
+          // More than half missing looks like a misalignment (time zone,
+          // rule change), not cancellations; don't wipe the series.
+          await _log(profileId,
+              'WARN src=$sourceId tgt=$targetId: ${missing.length} of '
+              '${inRange.length} occurrences differ from the source; '
+              'left unchanged');
+          continue;
+        }
+        for (final occurrence in missing) {
+          final ok = await _calendarService.excludeOccurrence(
+            targetId,
+            occurrence.startDate,
+          );
+          await _log(
+            profileId,
+            ok
+                ? 'EXCLUDE src=$sourceId "${occurrence.title}" occurrence '
+                    '${_stamp(occurrence.startDate)} from tgt=$targetId '
+                    '(cancelled or moved in source)'
+                : 'ERROR could not exclude occurrence '
+                    '${_stamp(occurrence.startDate)} from tgt=$targetId',
+          );
+        }
+      }
+    } catch (e) {
+      await _log(profileId, 'ERROR checking recurring occurrences: $e');
+    }
+  }
+
   Future<void> _checkTarget(String profileId, String targetCalendarId) async {
     try {
       final listed = await _calendarService.listEvents(targetCalendarId);
@@ -360,6 +464,9 @@ class SyncEngine {
   /// for the log only: they show whether the calendar keeps the same
   /// meeting UID when it re-creates an event under a new ID.
   Map<String, EventIdentity> _identities = {};
+
+  /// The source listing of the current run, reused after it.
+  List<Event>? _lastSourceListing;
 
   String _idTag(String eventId) {
     final identity = _identities[eventId];
@@ -601,6 +708,7 @@ class SyncEngine {
 
     final listedAt = _clock();
     final listed = await _calendarService.listEvents(sourceCalendarId);
+    _lastSourceListing = listed;
     if (listed == null) {
       // Without the source listing every mapping would look orphaned, so
       // bail out instead of deleting synced events.

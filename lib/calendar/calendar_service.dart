@@ -118,6 +118,20 @@ class CalendarService {
     }
   }
 
+  /// Adds an exception date to a recurring event so the occurrence starting
+  /// at [occurrenceStart] is no longer generated.
+  Future<bool> excludeOccurrence(String eventId, DateTime occurrenceStart) async {
+    try {
+      final ok = await _channel.invokeMethod<bool>('excludeOccurrence', {
+        'eventId': eventId,
+        'start': occurrenceStart.millisecondsSinceEpoch,
+      });
+      return ok == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Whether the event row is gone or flagged as deleted by its sync adapter.
   ///
   /// Returns false when the check itself fails, so callers fall back to

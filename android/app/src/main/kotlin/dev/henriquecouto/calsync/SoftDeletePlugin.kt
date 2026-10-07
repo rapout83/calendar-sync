@@ -46,6 +46,61 @@ class SoftDeletePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     result.error("DELETE_ERROR", e.message, null)
                 }
             }
+            "excludeOccurrence" -> {
+                val eventId = call.argument<String>("eventId")
+                val start = call.argument<Number>("start")?.toLong()
+                if (eventId == null || start == null) {
+                    result.error("INVALID_ARG", "eventId and start are required", null)
+                    return
+                }
+                val ctx = appContext ?: run {
+                    result.error("NO_CONTEXT", "Plugin not attached", null)
+                    return
+                }
+                try {
+                    val format = java.text.SimpleDateFormat("yyyyMMdd'T'HHmmss'Z'", java.util.Locale.US)
+                    format.timeZone = java.util.TimeZone.getTimeZone("UTC")
+                    val exdate = format.format(java.util.Date(start))
+                    var existing: String? = null
+                    var found = false
+                    ctx.contentResolver.query(
+                        CalendarContract.Events.CONTENT_URI,
+                        arrayOf(CalendarContract.Events.EXDATE),
+                        "${CalendarContract.Events._ID} = ? AND ${CalendarContract.Events.DELETED} = 0",
+                        arrayOf(eventId),
+                        null
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            found = true
+                            existing = cursor.getString(0)
+                        }
+                    }
+                    if (!found) {
+                        result.success(false)
+                        return
+                    }
+                    val current = existing
+                    if (current != null && current.split(",").contains(exdate)) {
+                        result.success(true)
+                        return
+                    }
+                    val values = ContentValues().apply {
+                        put(
+                            CalendarContract.Events.EXDATE,
+                            if (current.isNullOrEmpty()) exdate else "$current,$exdate"
+                        )
+                    }
+                    val rows = ctx.contentResolver.update(
+                        CalendarContract.Events.CONTENT_URI,
+                        values,
+                        "${CalendarContract.Events._ID} = ?",
+                        arrayOf(eventId)
+                    )
+                    result.success(rows > 0)
+                } catch (e: Exception) {
+                    result.error("EXDATE_ERROR", e.message, null)
+                }
+            }
             "getEventIdentities" -> {
                 val ids = call.argument<List<String>>("eventIds")
                 if (ids == null) {

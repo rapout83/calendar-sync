@@ -76,6 +76,8 @@ void main() {
     when(() => mappingDb.relinkMapping(any(), any())).thenAnswer((_) async {});
     when(() => calendarService.getEventIdentities(any()))
         .thenAnswer((_) async => {});
+    when(() => calendarService.excludeOccurrence(any(), any()))
+        .thenAnswer((_) async => true);
     when(() => calendarService.updateEvent(
           any(),
           title: any(named: 'title'),
@@ -85,6 +87,100 @@ void main() {
           location: any(named: 'location'),
           setLocation: any(named: 'setLocation'),
         )).thenAnswer((_) async => false);
+  });
+
+  group('Removed occurrences of recurring series', () {
+    final base = DateTime.now();
+    // Weekly occurrences at 13:00 local time, 3..24 days ahead.
+    List<DateTime> weekly() => [
+          for (var week = 0; week < 4; week++)
+            DateTime(base.year, base.month, base.day + 3 + week * 7, 13),
+        ];
+    Event instance(String id, String calId, DateTime start) => Event(
+          eventId: id,
+          instanceId: '$id-${start.millisecondsSinceEpoch}',
+          calendarId: calId,
+          title: 'Saeb-Henry Fortnightly 1:1',
+          startDate: start,
+          endDate: start.add(const Duration(minutes: 30)),
+          isAllDay: false,
+          availability: EventAvailability.busy,
+          status: EventStatus.none,
+          isRecurring: true,
+        );
+
+    void stub({required List<DateTime> source, required List<DateTime> target}) {
+      when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
+        (_) async => [for (final t in source) instance('src-r', sourceCalId, t)],
+      );
+      when(() => calendarService.listEvents(targetCalId)).thenAnswer(
+        (_) async => [for (final t in target) instance('tgt-r', targetCalId, t)],
+      );
+      when(() => mappingDb.listMappingsForCalendar(profileId, sourceCalId))
+          .thenAnswer((_) async => [
+                {
+                  'id': 1,
+                  'source_event_id': 'src-r',
+                  'target_event_id': 'tgt-r',
+                  'target_calendar_id': targetCalId,
+                },
+              ]);
+      when(() => calendarService.getEvent('src-r')).thenAnswer(
+          (_) async => instance('src-r', sourceCalId, source.first));
+      when(() => mappingDb.isEventCreatedBySync(any(), any()))
+          .thenAnswer((_) async => true);
+    }
+
+    Future<void> sync() => engine.runSync(
+          profileId: profileId,
+          sourceCalendarId: sourceCalId,
+          targetCalendarId: targetCalId,
+          syncEventName: syncName,
+        );
+
+    test('occurrence cancelled in the source is excluded from the target',
+        () async {
+      final all = weekly();
+      stub(source: [all[0], all[2], all[3]], target: all);
+
+      await sync();
+
+      verify(() => calendarService.excludeOccurrence('tgt-r', all[1]))
+          .called(1);
+    });
+
+    test('matching series is left alone', () async {
+      final all = weekly();
+      stub(source: all, target: all);
+
+      await sync();
+
+      verifyNever(() => calendarService.excludeOccurrence(any(), any()));
+    });
+
+    test('same dates at shifted times (time zone) are not excluded', () async {
+      final all = weekly();
+      stub(
+        source: [for (final t in all) t.add(const Duration(hours: 1))],
+        target: all,
+      );
+
+      await sync();
+
+      verifyNever(() => calendarService.excludeOccurrence(any(), any()));
+    });
+
+    test('mostly mismatched series is left alone', () async {
+      final all = weekly();
+      stub(
+        source: [for (final t in all) t.add(const Duration(days: 1))],
+        target: all,
+      );
+
+      await sync();
+
+      verifyNever(() => calendarService.excludeOccurrence(any(), any()));
+    });
   });
 
   group('Event identity logging', () {
