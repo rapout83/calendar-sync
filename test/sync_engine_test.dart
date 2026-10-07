@@ -74,6 +74,8 @@ void main() {
     when(() => mappingDb.recordSourceSignature(any(), any(), any(), any()))
         .thenAnswer((_) async {});
     when(() => mappingDb.relinkMapping(any(), any())).thenAnswer((_) async {});
+    when(() => calendarService.getEventIdentities(any()))
+        .thenAnswer((_) async => {});
     when(() => calendarService.updateEvent(
           any(),
           title: any(named: 'title'),
@@ -83,6 +85,57 @@ void main() {
           location: any(named: 'location'),
           setLocation: any(named: 'setLocation'),
         )).thenAnswer((_) async => false);
+  });
+
+  group('Event identity logging', () {
+    test('CREATE line carries the meeting UID and sync ID', () async {
+      final start = now.add(const Duration(days: 1));
+      when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
+        (_) async => [
+          _makeEvent('src-1', start: start, end: start.add(const Duration(hours: 1))),
+        ],
+      );
+      when(() => mappingDb.listMappingsForCalendar(profileId, sourceCalId))
+          .thenAnswer((_) async => []);
+      when(() => mappingDb.isEventCreatedBySync(sourceCalId, 'src-1'))
+          .thenAnswer((_) async => false);
+      when(() => mappingDb.isEventSynced(profileId, sourceCalId, 'src-1'))
+          .thenAnswer((_) async => false);
+      when(() => calendarService.getEventIdentities(any())).thenAnswer(
+        (_) async => {'src-1': const EventIdentity(uid: 'UID-1', syncId: 'SYNC-1')},
+      );
+      when(() => calendarService.createEvent(
+            any(), any(), any(), any(),
+            description: any(named: 'description'),
+            isAllDay: any(named: 'isAllDay'),
+          )).thenAnswer((_) async => 'tgt-1');
+      when(() => mappingDb.insertMapping(
+            profileId: any(named: 'profileId'),
+            sourceCalendarId: any(named: 'sourceCalendarId'),
+            sourceEventId: any(named: 'sourceEventId'),
+            targetCalendarId: any(named: 'targetCalendarId'),
+            targetEventId: any(named: 'targetEventId'),
+            syncedAt: any(named: 'syncedAt'),
+            canonicalTime: any(named: 'canonicalTime'),
+          )).thenAnswer((_) async {});
+      when(() => mappingDb.insertCreatedEvent(any(), any()))
+          .thenAnswer((_) async {});
+
+      await engine.runSync(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      final lines = verify(() => mappingDb.appendSyncLog(profileId, captureAny()))
+          .captured
+          .cast<String>();
+      expect(lines, contains(allOf(
+        startsWith('CREATE src=src-1'),
+        contains('[uid=UID-1 sync=SYNC-1]'),
+      )));
+    });
   });
 
   group('Target check', () {

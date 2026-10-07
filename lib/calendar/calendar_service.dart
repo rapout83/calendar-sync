@@ -94,6 +94,30 @@ class CalendarService {
     }
   }
 
+  /// Server-side identities of events: the iCalendar UID and the sync
+  /// adapter's sync ID, keyed by event ID. Empty when unavailable.
+  Future<Map<String, EventIdentity>> getEventIdentities(
+    List<String> eventIds,
+  ) async {
+    if (eventIds.isEmpty) return {};
+    try {
+      final raw = await _channel.invokeMethod<Map<Object?, Object?>>(
+        'getEventIdentities',
+        {'eventIds': eventIds},
+      );
+      if (raw == null) return {};
+      return {
+        for (final entry in raw.entries)
+          entry.key as String: EventIdentity(
+            uid: (entry.value as Map?)?['uid'] as String?,
+            syncId: (entry.value as Map?)?['syncId'] as String?,
+          ),
+      };
+    } catch (_) {
+      return {};
+    }
+  }
+
   /// Whether the event row is gone or flagged as deleted by its sync adapter.
   ///
   /// Returns false when the check itself fails, so callers fall back to
@@ -121,6 +145,13 @@ class CalendarService {
       return const CalendarDeleteResult(success: false);
     }
   }
+}
+
+class EventIdentity {
+  final String? uid;
+  final String? syncId;
+
+  const EventIdentity({this.uid, this.syncId});
 }
 
 class CalendarDeleteResult {

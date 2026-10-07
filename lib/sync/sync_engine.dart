@@ -356,10 +356,28 @@ class SyncEngine {
     return flat.length > 120 ? '${flat.substring(0, 120)}...' : flat;
   }
 
-  static String _describe(Event event) {
+  /// Server-side identities of the source events seen in the current run,
+  /// for the log only: they show whether the calendar keeps the same
+  /// meeting UID when it re-creates an event under a new ID.
+  Map<String, EventIdentity> _identities = {};
+
+  String _idTag(String eventId) {
+    final identity = _identities[eventId];
+    if (identity == null) return ' [uid=? sync=?]';
+    String short(String? value) {
+      if (value == null || value.isEmpty) return '-';
+      return value.length > 48
+          ? '${value.substring(0, 16)}…${value.substring(value.length - 28)}'
+          : value;
+    }
+
+    return ' [uid=${short(identity.uid)} sync=${short(identity.syncId)}]';
+  }
+
+  String _describe(Event event) {
     final start = event.startDate.toLocal().toIso8601String();
     final when = start.length >= 16 ? start.substring(0, 16) : start;
-    return 'src=${event.eventId} "${event.title}" $when';
+    return 'src=${event.eventId} "${event.title}" $when${_idTag(event.eventId)}';
   }
 
   Future<SyncResult> _runSyncLocked({
@@ -604,6 +622,12 @@ class SyncEngine {
     final sourceEventIds = sourceEvents.map((e) => e.eventId).toSet();
     final mappedIds =
         mappings.map((m) => m['source_event_id'] as String).toSet();
+    try {
+      _identities = await _calendarService
+          .getEventIdentities({...sourceEventIds, ...mappedIds}.toList());
+    } catch (_) {
+      _identities = {};
+    }
 
     // Instances of a series share the event ID; keep one per ID.
     final listedById = <String, Event>{};
@@ -670,7 +694,7 @@ class SyncEngine {
           // The calendar created a copy of an event that is already synced
           // and kept the original; don't sync the copy.
           await _log(profileId,
-              'SKIP ${_describe(event)}: same event as src=$twin');
+              'SKIP ${_describe(event)}: same event as src=$twin${_idTag(twin)}');
           processedIds.add(eventId);
           toSkip.add(event);
           continue;
@@ -911,7 +935,7 @@ class SyncEngine {
         await _mappingDb.relinkMapping(entry.mapping['id'] as int, event.eventId);
         await _log(
           profileId,
-          'RELINK ${_describe(event)} replaces src=$oldId, '
+          'RELINK ${_describe(event)} replaces src=$oldId${_idTag(oldId)}, '
           'keeping tgt=${entry.mapping['target_event_id']}',
         );
         updated.add(event.eventId);
@@ -938,7 +962,7 @@ class SyncEngine {
         await _mappingDb.deleteCreatedEvent(targetCalId, targetEventId);
         await _log(
           profileId,
-          'DELETE src=$sourceEventId tgt=$targetEventId '
+          'DELETE src=$sourceEventId${_idTag(sourceEventId)} tgt=$targetEventId '
           '(${entry['delete_reason'] ?? 'source gone'})',
         );
         deleted.add(sourceEventId);

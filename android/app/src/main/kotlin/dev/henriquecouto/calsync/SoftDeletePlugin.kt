@@ -46,6 +46,47 @@ class SoftDeletePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     result.error("DELETE_ERROR", e.message, null)
                 }
             }
+            "getEventIdentities" -> {
+                val ids = call.argument<List<String>>("eventIds")
+                if (ids == null) {
+                    result.error("INVALID_ARG", "eventIds is required", null)
+                    return
+                }
+                val ctx = appContext ?: run {
+                    result.error("NO_CONTEXT", "Plugin not attached", null)
+                    return
+                }
+                try {
+                    // UID_2445 is the iCalendar UID the server assigns to the
+                    // meeting; _SYNC_ID is the sync adapter's server-side ID.
+                    // Both may survive when the adapter re-creates the local
+                    // row under a new _ID.
+                    val identities = HashMap<String, Map<String, String?>>()
+                    for (chunk in ids.chunked(200)) {
+                        ctx.contentResolver.query(
+                            CalendarContract.Events.CONTENT_URI,
+                            arrayOf(
+                                CalendarContract.Events._ID,
+                                CalendarContract.Events.UID_2445,
+                                CalendarContract.Events._SYNC_ID,
+                            ),
+                            "${CalendarContract.Events._ID} IN (${chunk.joinToString(",") { "?" }})",
+                            chunk.toTypedArray(),
+                            null
+                        )?.use { cursor ->
+                            while (cursor.moveToNext()) {
+                                identities[cursor.getLong(0).toString()] = mapOf(
+                                    "uid" to cursor.getString(1),
+                                    "syncId" to cursor.getString(2),
+                                )
+                            }
+                        }
+                    }
+                    result.success(identities)
+                } catch (e: Exception) {
+                    result.error("QUERY_ERROR", e.message, null)
+                }
+            }
             "updateEvent" -> {
                 val eventId = call.argument<String>("eventId")?.toLongOrNull()
                 val title = call.argument<String>("title")
