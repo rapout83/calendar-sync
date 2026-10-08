@@ -172,9 +172,15 @@ class SyncEngine {
         errors: UnmodifiableListView(['another sync is still running']),
       );
     }
-    // Keep the lock fresh while this run is alive. If the run is killed or
-    // hangs, the refreshes stop and the next sync takes over within minutes.
-    final heartbeat = Timer.periodic(const Duration(seconds: 15), (_) {
+    // Keep the lock fresh while this run is alive. If the run is killed the
+    // refreshes stop; if it hangs, they stop after a few minutes. Either way
+    // the next sync takes over shortly after.
+    final runStarted = Stopwatch()..start();
+    final heartbeat = Timer.periodic(const Duration(seconds: 15), (timer) {
+      if (runStarted.elapsed > const Duration(minutes: 3)) {
+        timer.cancel();
+        return;
+      }
       _mappingDb.refreshSyncLock(owner).catchError((_) {});
     });
     try {

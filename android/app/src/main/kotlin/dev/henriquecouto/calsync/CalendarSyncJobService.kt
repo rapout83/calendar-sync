@@ -12,6 +12,8 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.CalendarContract
 import androidx.core.app.NotificationCompat
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import dev.fluttercommunity.workmanager.WorkManagerWrapper
 import dev.fluttercommunity.workmanager.pigeon.ExistingWorkPolicy
 import dev.fluttercommunity.workmanager.pigeon.OneOffTaskRequest
@@ -22,25 +24,42 @@ class CalendarSyncJobService : JobService() {
         schedule(applicationContext)
         showProgressNotification()
 
-        // Keep a queued or running sync instead of replacing it: every
-        // calendar write (including the sync's own) lands here, and
-        // replacing would kill the sync midway and can leave duplicates.
-        // Changes made during a run are picked up by the next trigger or
-        // the periodic sync.
-        val request = OneOffTaskRequest(
-            uniqueName = "calendar_sync_reactive",
-            taskName = "syncTask",
-            tag = "calendar_sync_reactive",
-            initialDelaySeconds = 5,
-            existingWorkPolicy = ExistingWorkPolicy.KEEP,
-        )
-        WorkManagerWrapper(applicationContext).enqueueOneOffTask(request)
+        enqueueSync(applicationContext)
 
         Handler(Looper.getMainLooper()).postDelayed({
             checkAndDismiss()
         }, 5_000L)
 
         return false
+    }
+
+    // Every calendar change (including the sync's own writes) lands here.
+    // A running sync must not be replaced (that kills it midway), and the
+    // trigger must not be dropped either: the running sync may have read
+    // the calendar before this change. So while the primary sync runs,
+    // queue a single follow-up that starts after it and reads the calendar
+    // afresh. KEEP only drops a trigger when an identical sync is still
+    // waiting to start, which will see the change anyway.
+    private fun enqueueSync(context: Context) {
+        Thread {
+            val primaryRunning = try {
+                WorkManager.getInstance(context)
+                    .getWorkInfosForUniqueWork(PRIMARY_WORK)
+                    .get()
+                    .any { it.state == WorkInfo.State.RUNNING }
+            } catch (e: Exception) {
+                false
+            }
+            val name = if (primaryRunning) FOLLOW_UP_WORK else PRIMARY_WORK
+            val request = OneOffTaskRequest(
+                uniqueName = name,
+                taskName = name,
+                tag = name,
+                initialDelaySeconds = 5,
+                existingWorkPolicy = ExistingWorkPolicy.KEEP,
+            )
+            WorkManagerWrapper(context).enqueueOneOffTask(request)
+        }.start()
     }
 
     override fun onStopJob(params: JobParameters?): Boolean {
@@ -80,6 +99,9 @@ class CalendarSyncJobService : JobService() {
     }
 
     companion object {
+        private const val PRIMARY_WORK = "calendar_sync_reactive"
+        private const val FOLLOW_UP_WORK = "calendar_sync_reactive_followup"
+
         fun schedule(context: Context) {
             val component = ComponentName(
                 context.packageName,

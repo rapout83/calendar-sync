@@ -12,6 +12,9 @@ import '../subscriptions/subscription_service.dart';
 void callbackDispatcher() {
   Workmanager().executeTask((taskName, inputData) async {
     try {
+      await MappingDatabase().appendSyncLog('', 'TASK start ($taskName)');
+    } catch (_) {}
+    try {
       final profileService = ProfileService();
       final profiles = await profileService.listEnabledProfiles();
 
