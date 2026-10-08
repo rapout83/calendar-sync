@@ -58,7 +58,7 @@ void main() {
       expect(await mappingDb.tryAcquireSyncLock('b'), isFalse);
     });
 
-    test('lock without refresh for 2 minutes is taken over', () async {
+    test('lock without refresh for a minute is taken over', () async {
       expect(await mappingDb.tryAcquireSyncLock('a'), isTrue);
       await db.update('sync_lock', {
         'acquired_at': DateTime.now()

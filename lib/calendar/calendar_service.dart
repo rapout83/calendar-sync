@@ -132,6 +132,28 @@ class CalendarService {
     }
   }
 
+  /// Raw event rows of [calendarId] that start in [from]..[to], straight
+  /// from the provider (not expanded into instances). Diagnostic use.
+  Future<List<Map<String, Object?>>> listEventRows(
+    String calendarId,
+    DateTime from,
+    DateTime to,
+  ) async {
+    try {
+      final rows = await _channel.invokeMethod<List<Object?>>('listEventRows', {
+        'calendarId': calendarId,
+        'from': from.millisecondsSinceEpoch,
+        'to': to.millisecondsSinceEpoch,
+      });
+      return [
+        for (final row in rows ?? const [])
+          Map<String, Object?>.from(row as Map),
+      ];
+    } catch (_) {
+      return [];
+    }
+  }
+
   /// Whether the event row is gone or flagged as deleted by its sync adapter.
   ///
   /// Returns false when the check itself fails, so callers fall back to

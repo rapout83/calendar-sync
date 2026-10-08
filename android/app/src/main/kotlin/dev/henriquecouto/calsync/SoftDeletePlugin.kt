@@ -46,6 +46,57 @@ class SoftDeletePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     result.error("DELETE_ERROR", e.message, null)
                 }
             }
+            "listEventRows" -> {
+                val calendarId = call.argument<String>("calendarId")
+                val from = call.argument<Number>("from")?.toLong()
+                val to = call.argument<Number>("to")?.toLong()
+                if (calendarId == null || from == null || to == null) {
+                    result.error("INVALID_ARG", "calendarId, from and to are required", null)
+                    return
+                }
+                val ctx = appContext ?: run {
+                    result.error("NO_CONTEXT", "Plugin not attached", null)
+                    return
+                }
+                try {
+                    val rows = ArrayList<Map<String, Any?>>()
+                    ctx.contentResolver.query(
+                        CalendarContract.Events.CONTENT_URI,
+                        arrayOf(
+                            CalendarContract.Events._ID,
+                            CalendarContract.Events.TITLE,
+                            CalendarContract.Events.DTSTART,
+                            CalendarContract.Events.DTEND,
+                            CalendarContract.Events.STATUS,
+                            CalendarContract.Events.ORIGINAL_ID,
+                            CalendarContract.Events.ORIGINAL_INSTANCE_TIME,
+                            CalendarContract.Events.RRULE,
+                        ),
+                        "${CalendarContract.Events.CALENDAR_ID} = ? AND " +
+                            "${CalendarContract.Events.DELETED} = 0 AND " +
+                            "${CalendarContract.Events.DTSTART} >= ? AND " +
+                            "${CalendarContract.Events.DTSTART} < ?",
+                        arrayOf(calendarId, from.toString(), to.toString()),
+                        null
+                    )?.use { cursor ->
+                        while (cursor.moveToNext()) {
+                            rows.add(mapOf(
+                                "id" to cursor.getLong(0).toString(),
+                                "title" to cursor.getString(1),
+                                "start" to if (cursor.isNull(2)) null else cursor.getLong(2),
+                                "end" to if (cursor.isNull(3)) null else cursor.getLong(3),
+                                "status" to if (cursor.isNull(4)) null else cursor.getInt(4),
+                                "originalId" to cursor.getString(5),
+                                "originalInstanceTime" to if (cursor.isNull(6)) null else cursor.getLong(6),
+                                "recurring" to !cursor.isNull(7),
+                            ))
+                        }
+                    }
+                    result.success(rows)
+                } catch (e: Exception) {
+                    result.error("QUERY_ERROR", e.message, null)
+                }
+            }
             "excludeOccurrence" -> {
                 val eventId = call.argument<String>("eventId")
                 val start = call.argument<Number>("start")?.toLong()

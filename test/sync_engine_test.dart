@@ -78,6 +78,8 @@ void main() {
         .thenAnswer((_) async => {});
     when(() => calendarService.excludeOccurrence(any(), any()))
         .thenAnswer((_) async => true);
+    when(() => calendarService.listEventRows(any(), any(), any()))
+        .thenAnswer((_) async => []);
     when(() => calendarService.updateEvent(
           any(),
           title: any(named: 'title'),
@@ -180,6 +182,51 @@ void main() {
       await sync();
 
       verifyNever(() => calendarService.excludeOccurrence(any(), any()));
+    });
+  });
+
+  group('Unlisted source events', () {
+    test('rows missing from the listing are logged', () async {
+      final start = DateTime.now().add(const Duration(days: 4));
+      when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
+        (_) async => [
+          _makeEvent('src-1', start: start, end: start.add(const Duration(hours: 1))),
+        ],
+      );
+      when(() => mappingDb.listMappingsForCalendar(profileId, sourceCalId))
+          .thenAnswer((_) async => []);
+      when(() => mappingDb.isEventCreatedBySync(sourceCalId, 'src-1'))
+          .thenAnswer((_) async => true);
+      when(() => calendarService.listEventRows(sourceCalId, any(), any()))
+          .thenAnswer((_) async => [
+                {'id': 'src-1', 'title': 'Listed'},
+                {
+                  'id': 'src-9',
+                  'title': 'Ries - Henry 1:1',
+                  'start': start.millisecondsSinceEpoch,
+                  'end': start.add(const Duration(minutes: 30)).millisecondsSinceEpoch,
+                  'status': 1,
+                  'originalId': '22158',
+                  'originalInstanceTime': null,
+                  'recurring': false,
+                },
+              ]);
+
+      await engine.runSync(
+        profileId: profileId,
+        sourceCalendarId: sourceCalId,
+        targetCalendarId: targetCalId,
+        syncEventName: syncName,
+      );
+
+      final lines = verify(() => mappingDb.appendSyncLog(profileId, captureAny()))
+          .captured
+          .cast<String>();
+      expect(lines, contains(allOf(
+        startsWith('UNLISTED src=src-9 "Ries - Henry 1:1"'),
+        contains('series=22158'),
+      )));
+      expect(lines.where((l) => l.startsWith('UNLISTED src=src-1')), isEmpty);
     });
   });
 

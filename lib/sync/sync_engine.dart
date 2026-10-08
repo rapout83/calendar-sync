@@ -174,7 +174,7 @@ class SyncEngine {
     }
     // Keep the lock fresh while this run is alive. If the run is killed or
     // hangs, the refreshes stop and the next sync takes over within minutes.
-    final heartbeat = Timer.periodic(const Duration(seconds: 30), (_) {
+    final heartbeat = Timer.periodic(const Duration(seconds: 15), (_) {
       _mappingDb.refreshSyncLock(owner).catchError((_) {});
     });
     try {
@@ -202,6 +202,7 @@ class SyncEngine {
         sourceCalendarId,
         targetCalendarId,
       );
+      await _logUnlistedSourceEvents(profileId, sourceCalendarId);
       await _checkTarget(profileId, targetCalendarId);
       return result;
     } finally {
@@ -342,6 +343,43 @@ class SyncEngine {
       }
     } catch (e) {
       await _log(profileId, 'ERROR checking recurring occurrences: $e');
+    }
+  }
+
+  /// Diagnostic: logs source calendar events in the sync window that the
+  /// event listing did not return, e.g. moved occurrences of a series that
+  /// the calendar stores in a form the listing skips.
+  Future<void> _logUnlistedSourceEvents(
+    String profileId,
+    String sourceCalendarId,
+  ) async {
+    try {
+      final listing = _lastSourceListing;
+      if (listing == null) return;
+      final listedIds = listing.map((e) => e.eventId).toSet();
+      final now = DateTime.now();
+      final rows = await _calendarService.listEventRows(
+        sourceCalendarId,
+        now,
+        now.add(CalendarService.syncWindow),
+      );
+      final unlisted =
+          rows.where((r) => !listedIds.contains(r['id']?.toString())).toList();
+      for (final row in unlisted.take(10)) {
+        String time(Object? ms) => ms is int
+            ? _stamp(DateTime.fromMillisecondsSinceEpoch(ms))
+            : '-';
+        await _log(
+          profileId,
+          'UNLISTED src=${row['id']} "${row['title']}" ${time(row['start'])}'
+          '..${time(row['end'])} status=${row['status']} '
+          'series=${row['originalId'] ?? '-'} '
+          'originalTime=${time(row['originalInstanceTime'])} '
+          'recurring=${row['recurring']}',
+        );
+      }
+    } catch (e) {
+      await _log(profileId, 'ERROR listing source event rows: $e');
     }
   }
 
@@ -786,6 +824,7 @@ class SyncEngine {
       omitSourceTitle: omitSourceTitle,
     );
     final relinkedIds = toRelink.map((r) => r.sourceEvent.eventId).toSet();
+    final unloadableSeries = <String>{};
 
     for (final event in sourceEvents) {
       final eventId = event.eventId;
@@ -844,6 +883,10 @@ class SyncEngine {
             copyDescription: copyDescription,
             omitSourceTitle: omitSourceTitle,
           );
+        } else if (unloadableSeries.add(eventId)) {
+          await _log(profileId,
+              'SKIP ${_describe(event)}: occurrence of a series that could '
+              'not be loaded');
         }
         toSkip.add(event);
         continue;
@@ -898,6 +941,8 @@ class SyncEngine {
     try {
       final description = event.description;
       if (description != null && description.contains(_syncMarker)) {
+        await _log(profileId,
+            'SKIP ${_describe(event)}: created by CalSync (sync marker)');
         toSkip.add(event);
         return;
       }
@@ -907,6 +952,7 @@ class SyncEngine {
         eventId,
       );
       if (createdBySync) {
+        await _log(profileId, 'SKIP ${_describe(event)}: created by CalSync');
         toSkip.add(event);
         return;
       }

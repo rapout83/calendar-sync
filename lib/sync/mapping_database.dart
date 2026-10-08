@@ -244,7 +244,7 @@ class MappingDatabase {
   /// hung, and is taken over.
   Future<bool> tryAcquireSyncLock(
     String owner, {
-    Duration staleAfter = const Duration(minutes: 2),
+    Duration staleAfter = const Duration(minutes: 1),
   }) async {
     final db = await database;
     final now = DateTime.now().toUtc();
