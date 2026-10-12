@@ -80,6 +80,8 @@ void main() {
         .thenAnswer((_) async => true);
     when(() => calendarService.listEventRows(any(), any(), any()))
         .thenAnswer((_) async => []);
+    when(() => calendarService.setRecurringDuration(any(), any(),
+        allDay: any(named: 'allDay'))).thenAnswer((_) async => true);
     when(() => calendarService.updateEvent(
           any(),
           title: any(named: 'title'),
@@ -98,25 +100,34 @@ void main() {
           for (var week = 0; week < 4; week++)
             DateTime(base.year, base.month, base.day + 3 + week * 7, 13),
         ];
-    Event instance(String id, String calId, DateTime start) => Event(
+    Event instance(String id, String calId, DateTime start,
+            {Duration length = const Duration(minutes: 30)}) =>
+        Event(
           eventId: id,
           instanceId: '$id-${start.millisecondsSinceEpoch}',
           calendarId: calId,
           title: 'Saeb-Henry Fortnightly 1:1',
           startDate: start,
-          endDate: start.add(const Duration(minutes: 30)),
+          endDate: start.add(length),
           isAllDay: false,
           availability: EventAvailability.busy,
           status: EventStatus.none,
           isRecurring: true,
         );
 
-    void stub({required List<DateTime> source, required List<DateTime> target}) {
+    void stub({
+      required List<DateTime> source,
+      required List<DateTime> target,
+      Duration targetLength = const Duration(minutes: 30),
+    }) {
       when(() => calendarService.listEvents(sourceCalId)).thenAnswer(
         (_) async => [for (final t in source) instance('src-r', sourceCalId, t)],
       );
       when(() => calendarService.listEvents(targetCalId)).thenAnswer(
-        (_) async => [for (final t in target) instance('tgt-r', targetCalId, t)],
+        (_) async => [
+          for (final t in target)
+            instance('tgt-r', targetCalId, t, length: targetLength),
+        ],
       );
       when(() => mappingDb.listMappingsForCalendar(profileId, sourceCalId))
           .thenAnswer((_) async => [
@@ -158,6 +169,20 @@ void main() {
       await sync();
 
       verifyNever(() => calendarService.excludeOccurrence(any(), any()));
+      verifyNever(() => calendarService.setRecurringDuration(any(), any(),
+          allDay: any(named: 'allDay')));
+    });
+
+    test('zero-length target occurrences get the source length back',
+        () async {
+      final all = weekly();
+      stub(source: all, target: all, targetLength: Duration.zero);
+
+      await sync();
+
+      verify(() => calendarService.setRecurringDuration(
+          'tgt-r', const Duration(minutes: 30),
+          allDay: any(named: 'allDay'))).called(1);
     });
 
     test('same dates at shifted times (time zone) are not excluded', () async {

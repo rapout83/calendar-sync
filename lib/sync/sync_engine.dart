@@ -284,9 +284,12 @@ class SyncEngine {
           now.add(CalendarService.syncWindow).subtract(const Duration(days: 1));
 
       final sourceDays = <String, Set<String>>{};
+      final sourceLength = <String, Duration>{};
       for (final event in sourceListing) {
         if (event.eventId == event.instanceId && !event.isRecurring) continue;
         sourceDays.putIfAbsent(event.eventId, () => {}).add(day(event.startDate));
+        sourceLength.putIfAbsent(
+            event.eventId, () => event.endDate.difference(event.startDate));
       }
       final targetInstances = <String, List<Event>>{};
       for (final event in targetListing) {
@@ -302,6 +305,31 @@ class SyncEngine {
         // No source instances in the window: the series ended or moved
         // out; that is handled as a change to the series itself.
         if (instances == null || days == null || days.isEmpty) continue;
+
+        // Occurrences in the target must be as long as in the source. A
+        // series edited without its DURATION can sync back with zero-length
+        // occurrences; restore the length from the source.
+        final length = sourceLength[sourceId];
+        final allDaySeries = instances.any((e) => e.isAllDay);
+        if (length != null && length > Duration.zero && !allDaySeries) {
+          final wrong = instances.firstWhere(
+            (e) => e.endDate.difference(e.startDate) != length,
+            orElse: () => instances.first,
+          );
+          final wrongLength = wrong.endDate.difference(wrong.startDate);
+          if (wrongLength != length) {
+            final ok =
+                await _calendarService.setRecurringDuration(targetId, length);
+            await _log(
+              profileId,
+              ok
+                  ? 'REPAIR tgt=$targetId "${wrong.title}": occurrences were '
+                      '${wrongLength.inMinutes} min, set to ${length.inMinutes} '
+                      'min like src=$sourceId'
+                  : 'ERROR could not repair length of tgt=$targetId',
+            );
+          }
+        }
 
         final inRange = instances
             .where((e) =>

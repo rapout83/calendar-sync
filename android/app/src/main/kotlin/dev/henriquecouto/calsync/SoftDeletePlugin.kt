@@ -23,6 +23,9 @@ class SoftDeletePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
         appContext = null
     }
 
+    private fun durationOf(millis: Long, allDay: Boolean): String =
+        if (allDay) "P${millis / 86_400_000L}D" else "P${millis / 1000L}S"
+
     override fun onMethodCall(@NonNull call: MethodCall, @NonNull result: MethodChannel.Result) {
         when (call.method) {
             "deleteEvent" -> {
@@ -114,9 +117,19 @@ class SoftDeletePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     val exdate = format.format(java.util.Date(start))
                     var existing: String? = null
                     var found = false
+                    var dtStart: Long? = null
+                    var dtEnd: Long? = null
+                    var duration: String? = null
+                    var allDay = false
                     ctx.contentResolver.query(
                         CalendarContract.Events.CONTENT_URI,
-                        arrayOf(CalendarContract.Events.EXDATE),
+                        arrayOf(
+                            CalendarContract.Events.EXDATE,
+                            CalendarContract.Events.DTSTART,
+                            CalendarContract.Events.DTEND,
+                            CalendarContract.Events.DURATION,
+                            CalendarContract.Events.ALL_DAY,
+                        ),
                         "${CalendarContract.Events._ID} = ? AND ${CalendarContract.Events.DELETED} = 0",
                         arrayOf(eventId),
                         null
@@ -124,6 +137,10 @@ class SoftDeletePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                         if (cursor.moveToFirst()) {
                             found = true
                             existing = cursor.getString(0)
+                            dtStart = if (cursor.isNull(1)) null else cursor.getLong(1)
+                            dtEnd = if (cursor.isNull(2)) null else cursor.getLong(2)
+                            duration = cursor.getString(3)
+                            allDay = cursor.getInt(4) != 0
                         }
                     }
                     if (!found) {
@@ -140,6 +157,16 @@ class SoftDeletePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                             CalendarContract.Events.EXDATE,
                             if (current.isNullOrEmpty()) exdate else "$current,$exdate"
                         )
+                        // Recurring rows must carry their length in DURATION
+                        // with DTEND empty. A row with only DTEND can lose its
+                        // length when the edit is synced, leaving zero-length
+                        // occurrences.
+                        val start = dtStart
+                        val end = dtEnd
+                        if (duration.isNullOrEmpty() && start != null && end != null && end > start) {
+                            put(CalendarContract.Events.DURATION, durationOf(end - start, allDay))
+                            putNull(CalendarContract.Events.DTEND)
+                        }
                     }
                     val rows = ctx.contentResolver.update(
                         CalendarContract.Events.CONTENT_URI,
@@ -150,6 +177,34 @@ class SoftDeletePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     result.success(rows > 0)
                 } catch (e: Exception) {
                     result.error("EXDATE_ERROR", e.message, null)
+                }
+            }
+            "setRecurringDuration" -> {
+                val eventId = call.argument<String>("eventId")
+                val millis = call.argument<Number>("durationMillis")?.toLong()
+                val allDay = call.argument<Boolean>("allDay") ?: false
+                if (eventId == null || millis == null || millis <= 0) {
+                    result.error("INVALID_ARG", "eventId and a positive durationMillis are required", null)
+                    return
+                }
+                val ctx = appContext ?: run {
+                    result.error("NO_CONTEXT", "Plugin not attached", null)
+                    return
+                }
+                try {
+                    val values = ContentValues().apply {
+                        put(CalendarContract.Events.DURATION, durationOf(millis, allDay))
+                        putNull(CalendarContract.Events.DTEND)
+                    }
+                    val rows = ctx.contentResolver.update(
+                        CalendarContract.Events.CONTENT_URI,
+                        values,
+                        "${CalendarContract.Events._ID} = ? AND ${CalendarContract.Events.DELETED} = 0",
+                        arrayOf(eventId)
+                    )
+                    result.success(rows > 0)
+                } catch (e: Exception) {
+                    result.error("DURATION_ERROR", e.message, null)
                 }
             }
             "getEventIdentities" -> {

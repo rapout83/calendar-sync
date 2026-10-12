@@ -154,6 +154,24 @@ class CalendarService {
     }
   }
 
+  /// Sets the length of every occurrence of a recurring event.
+  Future<bool> setRecurringDuration(
+    String eventId,
+    Duration duration, {
+    bool allDay = false,
+  }) async {
+    try {
+      final ok = await _channel.invokeMethod<bool>('setRecurringDuration', {
+        'eventId': eventId,
+        'durationMillis': duration.inMilliseconds,
+        'allDay': allDay,
+      });
+      return ok == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Whether the event row is gone or flagged as deleted by its sync adapter.
   ///
   /// Returns false when the check itself fails, so callers fall back to
