@@ -57,6 +57,7 @@ void main() {
 
   setUpAll(() {
     registerFallbackValue(DateTime(2000));
+    registerFallbackValue(Duration.zero);
   });
 
   setUp(() {
