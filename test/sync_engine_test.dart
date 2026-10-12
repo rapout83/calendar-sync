@@ -2141,7 +2141,6 @@ void main() {
 
   group('Recurring events (synced per occurrence)', () {
     final start = DateTime.utc(2026, 6, 23, 14, 0);
-    final end = DateTime.utc(2026, 6, 23, 15, 0);
     const description = 'Weekly Standup\n---\n🔃 Automatically created by CalSync';
 
     Event occurrence(String id, DateTime s, {String? instanceId}) => Event(
