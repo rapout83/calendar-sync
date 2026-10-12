@@ -118,60 +118,6 @@ class CalendarService {
     }
   }
 
-  /// Adds an exception date to a recurring event so the occurrence starting
-  /// at [occurrenceStart] is no longer generated.
-  Future<bool> excludeOccurrence(String eventId, DateTime occurrenceStart) async {
-    try {
-      final ok = await _channel.invokeMethod<bool>('excludeOccurrence', {
-        'eventId': eventId,
-        'start': occurrenceStart.millisecondsSinceEpoch,
-      });
-      return ok == true;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  /// Raw event rows of [calendarId] that start in [from]..[to], straight
-  /// from the provider (not expanded into instances). Diagnostic use.
-  Future<List<Map<String, Object?>>> listEventRows(
-    String calendarId,
-    DateTime from,
-    DateTime to,
-  ) async {
-    try {
-      final rows = await _channel.invokeMethod<List<Object?>>('listEventRows', {
-        'calendarId': calendarId,
-        'from': from.millisecondsSinceEpoch,
-        'to': to.millisecondsSinceEpoch,
-      });
-      return [
-        for (final row in rows ?? const [])
-          Map<String, Object?>.from(row as Map),
-      ];
-    } catch (_) {
-      return [];
-    }
-  }
-
-  /// Sets the length of every occurrence of a recurring event.
-  Future<bool> setRecurringDuration(
-    String eventId,
-    Duration duration, {
-    bool allDay = false,
-  }) async {
-    try {
-      final ok = await _channel.invokeMethod<bool>('setRecurringDuration', {
-        'eventId': eventId,
-        'durationMillis': duration.inMilliseconds,
-        'allDay': allDay,
-      });
-      return ok == true;
-    } catch (_) {
-      return false;
-    }
-  }
-
   /// Whether the event row is gone or flagged as deleted by its sync adapter.
   ///
   /// Returns false when the check itself fails, so callers fall back to
