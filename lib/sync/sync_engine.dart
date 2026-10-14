@@ -620,7 +620,7 @@ class SyncEngine {
         ? const Duration(days: 1)
         : const Duration(minutes: 5);
     final windowStart = listedAt.add(margin);
-    final windowEnd = listedAt.add(CalendarService.syncWindow).subtract(margin);
+    final windowEnd = CalendarService.windowEnd(listedAt).subtract(margin);
     final inWindow = sourceEvent.endDate.isAfter(windowStart) &&
         sourceEvent.startDate.isBefore(windowEnd);
     return inWindow ? 'source event no longer listed in sync window' : null;

@@ -16,7 +16,15 @@ class CalendarService {
   /// How far ahead of now [listEvents] looks.
   static const syncWindow = Duration(days: 30);
 
-  /// Lists events from now until now + [syncWindow].
+  /// End of the listing window: the end of the day [syncWindow] from [now],
+  /// so that day's events all come in together rather than as the clock
+  /// passes their start time.
+  static DateTime windowEnd(DateTime now) {
+    final last = now.toLocal().add(syncWindow);
+    return DateTime(last.year, last.month, last.day + 1);
+  }
+
+  /// Lists events from now until [windowEnd].
   ///
   /// Returns null when the calendar could not be read, so callers can tell
   /// a failed read apart from an empty calendar.
@@ -25,7 +33,7 @@ class CalendarService {
     try {
       return await _plugin.listEvents(
         now,
-        now.add(syncWindow),
+        windowEnd(now),
         calendarIds: [calendarId],
       );
     } on DeviceCalendarException {
